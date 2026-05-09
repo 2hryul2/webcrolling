@@ -1,0 +1,28 @@
+# Development
+node_modules/
+.env
+.env.local
+.env.*.local
+dist/
+build/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Claude Code
+.claude/
+!.claude/settings.json
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Project-specific
+*.tmp
+.cache/
