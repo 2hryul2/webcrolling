@@ -23,7 +23,11 @@ def setup_scheduler(worker: Worker, sources_config: dict) -> AsyncIOScheduler:
     for source_id, cfg in sources.items():
         if not cfg.get("enabled", False):
             continue
-        interval = int(cfg.get("poll_interval_sec", 600))
+        interval = int(
+            cfg.get("poll_interval_seconds")
+            or cfg.get("poll_interval_sec")
+            or 600
+        )
         scheduler.add_job(
             worker.run_once,
             trigger="interval",
