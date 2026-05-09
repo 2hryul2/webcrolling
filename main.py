@@ -11,6 +11,7 @@ import yaml
 from dotenv import load_dotenv
 from fastapi import FastAPI
 
+from app.database import validate_jsonl_file
 from app.routes.status import router as status_router
 from app.scheduler import setup_scheduler
 from monitor.worker import Worker
@@ -54,6 +55,14 @@ def _build_smtp_config() -> dict:
 async def lifespan(app: FastAPI):
     """Initialize Worker + scheduler on startup, shut down on exit."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    # FR-12 / Case D / Edge B — repair any partial JSONL lines from a prior crash.
+    for jsonl_name in ("events.jsonl", "alerts.jsonl"):
+        path = str(DATA_DIR / jsonl_name)
+        dropped = validate_jsonl_file(path)
+        if dropped:
+            logger.warning("Recovered %d corrupted line(s) from %s", dropped, path)
+
     smtp_config = _build_smtp_config()
     worker = Worker(
         config_path=str(SOURCES_PATH),
