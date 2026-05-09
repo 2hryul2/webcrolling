@@ -33,9 +33,9 @@ def test_different_title_different_hash():
 def test_event_exists_with_cache_set():
     cache = set()
     h = compute_content_hash("t", "u")
-    assert event_exists("ignored", h, cache) is False
+    assert event_exists(h, cache) is False
     cache.add(h)
-    assert event_exists("ignored", h, cache) is True
+    assert event_exists(h, cache) is True
 
 
 def test_load_existing_hashes_round_trip(tmp_data_dir):

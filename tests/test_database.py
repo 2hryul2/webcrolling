@@ -98,8 +98,8 @@ def test_compute_content_hash_deterministic():
 
 def test_event_exists_with_cache():
     cache = {"abc"}
-    assert event_exists("ignored", "abc", cache) is True
-    assert event_exists("ignored", "def", cache) is False
+    assert event_exists("abc", cache) is True
+    assert event_exists("def", cache) is False
 
 
 def test_load_existing_hashes(tmp_data_dir):

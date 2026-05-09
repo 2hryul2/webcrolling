@@ -37,7 +37,7 @@ def sample_event_dict() -> dict[str, Any]:
         "raw_payload": {"k": "v"},
         "content_hash": "abc123",
         "severity": "info",
-        "matched_keywords": None,
+        "matched_keywords": [],
     }
 
 
