@@ -2,12 +2,16 @@ sources:
   dart:
     name: "DART OpenAPI RSS"
     type: "rss"
-    endpoint: "https://dart.fss.or.kr/api/rssFeeds.json"
-    poll_interval_sec: 300
+    url: "https://dart.fss.or.kr/api/todayRSS.xml"
+    poll_interval_seconds: 300
+    timeout_seconds: 30
+    retry_attempts: 3
     enabled: true
   fsc:
     name: "금융위 보도자료"
     type: "rss"
-    endpoint: "https://www.fsc.go.kr/rss/pressRelease.xml"
-    poll_interval_sec: 600
+    url: "https://www.fsc.go.kr/rss/pressRelease.xml"
+    poll_interval_seconds: 600
+    timeout_seconds: 30
+    retry_attempts: 3
     enabled: true
