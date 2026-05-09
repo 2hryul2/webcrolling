@@ -1,0 +1,13 @@
+sources:
+  dart:
+    name: "DART OpenAPI RSS"
+    type: "rss"
+    endpoint: "https://dart.fss.or.kr/api/rssFeeds.json"
+    poll_interval_sec: 300
+    enabled: true
+  fsc:
+    name: "금융위 보도자료"
+    type: "rss"
+    endpoint: "https://www.fsc.go.kr/rss/pressRelease.xml"
+    poll_interval_sec: 600
+    enabled: true
