@@ -26,3 +26,15 @@ Thumbs.db
 # Project-specific
 *.tmp
 .cache/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.egg-info/
+
+# Project data
+data/*.jsonl
+data/*.json
+logs/*.log
