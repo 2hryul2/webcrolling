@@ -6,7 +6,7 @@ import json
 from datetime import datetime
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field, field_serializer
 
 
 def _json_default(obj: Any) -> Any:
@@ -29,10 +29,6 @@ def _parse_dt(value: Any) -> Any:
 class ExternalEvent(BaseModel):
     """Normalized external event collected from RSS/API sources."""
 
-    model_config = ConfigDict(
-        json_encoders={datetime: lambda v: v.isoformat()},
-    )
-
     source: str
     external_id: str
     title: str
@@ -43,7 +39,12 @@ class ExternalEvent(BaseModel):
     raw_payload: dict[str, Any] = Field(default_factory=dict)
     content_hash: str
     severity: Literal["urgent", "watch", "info"] = "info"
-    matched_keywords: Optional[list[str]] = None
+    matched_keywords: list[str] = Field(default_factory=list)
+    is_duplicate: bool = False
+
+    @field_serializer("published_at", "fetched_at")
+    def serialize_dt(self, dt: datetime) -> str:
+        return dt.isoformat()
 
     def to_jsonl(self) -> str:
         """Serialize to a single-line JSON string for JSONL append."""
@@ -64,16 +65,16 @@ class ExternalEvent(BaseModel):
 class AlertLog(BaseModel):
     """Record of an alert that was sent (or attempted)."""
 
-    model_config = ConfigDict(
-        json_encoders={datetime: lambda v: v.isoformat()},
-    )
-
     event_id: str
     channel: Literal["email", "file"]
     recipient: str
     sent_at: datetime
     status: Literal["sent", "failed"]
     error_message: Optional[str] = None
+
+    @field_serializer("sent_at")
+    def serialize_sent_at(self, dt: datetime) -> str:
+        return dt.isoformat()
 
     def to_jsonl(self) -> str:
         """Serialize to a single-line JSON string for JSONL append."""
@@ -94,16 +95,17 @@ class KeywordRule(BaseModel):
 
     keyword: str
     severity: Literal["urgent", "watch", "info"]
+    # Step 2 scaffolding: matcher uses this in Step 2 for fuzzy/exclusion matching.
     exclude_keywords: Optional[list[str]] = None
 
 
 class SystemState(BaseModel):
     """Persisted system state — last poll times and counters."""
 
-    model_config = ConfigDict(
-        json_encoders={datetime: lambda v: v.isoformat()},
-    )
-
     last_poll: dict[str, datetime] = Field(default_factory=dict)
     event_count: int = 0
     alert_count: int = 0
+
+    @field_serializer("last_poll")
+    def serialize_last_poll(self, value: dict[str, datetime]) -> dict[str, str]:
+        return {k: v.isoformat() if isinstance(v, datetime) else v for k, v in value.items()}
