@@ -1,8 +1,9 @@
 # Watchtower seed — 30개 사이트 (prototype SITES 배열과 동일 ID·이름·카테고리)
 #
-# 출처: ideation §부록 A. URL/crawl_method/content_selector/crawl_interval_min
-# 일부는 합리적 추정값이며 `# tentative` 주석으로 표시. 실제 URL/셀렉터 검증은
-# Step 3 (크롤러+Detector)에서 수행.
+# Step 3 검증 (2026-05-10): scripts/verify_seed_urls.py 로 30개 URL fetch 결과
+# 반영. HTTP 200 + Content-Type 매칭 통과한 사이트는 `# verified 2026-05-10`,
+# 보정한 사이트는 새 URL 아래 `# verified 2026-05-10 (URL 보정)`,
+# 보정 불가한 사이트는 `enabled: false` + `# tentative — pending owner review`.
 #
 # 모든 URL은 https 통일. crawl_interval_min은 60 이상 (FR-SITE-003).
 sites:
@@ -12,119 +13,135 @@ sites:
     url: "https://www.fsc.go.kr/no010101"
     category_id: reg
     crawl_method: html
-    content_selector: "#content .board-list"  # tentative
+    content_selector: "#content .board-list"
     crawl_interval_min: 120
+    enabled: false  # tentative — pending owner review (외부에서 ConnectError, 사내망 전용 가능성)
   - id: s2
     name: "금융감독원"
-    url: "https://www.fss.or.kr/fss/bbs/B0000188/list.do?menuNo=200218"  # tentative
+    url: "https://www.fss.or.kr/fss/bbs/B0000188/list.do?menuNo=200218"
     category_id: reg
     crawl_method: html
-    content_selector: ".board-list tbody tr"  # tentative
+    content_selector: ".board-list tbody tr"
     crawl_interval_min: 120
+    # verified 2026-05-10
   - id: s3
     name: "한국은행"
-    url: "https://www.bok.or.kr/portal/bbs/B0000338/list.do?menuNo=200761"  # tentative
+    url: "https://www.bok.or.kr/portal/bbs/B0000338/list.do?menuNo=200761"
     category_id: reg
     crawl_method: html
-    content_selector: ".bbs-list tbody tr"  # tentative
+    content_selector: ".bbs-list tbody tr"
     crawl_interval_min: 240
+    # verified 2026-05-10
   - id: s4
     name: "FATF"
-    url: "https://www.fatf-gafi.org/en/publications.html"  # tentative
+    url: "https://www.fatf-gafi.org/en/publications.html"
     category_id: reg
     crawl_method: html
-    content_selector: ".publication-list .item"  # tentative
+    content_selector: ".publication-list .item"
     crawl_interval_min: 720
+    enabled: false  # tentative — pending owner review (HTTP 403, UA/지역 차단 추정)
 
   # --- gov: 정부·정책 ------------------------------------------------------
   - id: s5
     name: "기획재정부"
-    url: "https://www.moef.go.kr/nw/nes/nesdta.do?menuNo=4010100"  # tentative
+    url: "https://www.moef.go.kr/nw/nes/nesdta.do?menuNo=4010100"
     category_id: gov
     crawl_method: html
-    content_selector: ".board-list tbody tr"  # tentative
+    content_selector: ".board-list tbody tr"
     crawl_interval_min: 240
+    enabled: false  # tentative — pending owner review (ConnectError)
   - id: s6
     name: "과학기술정보통신부"
-    url: "https://www.msit.go.kr/bbs/list.do?sCode=user&mPid=112&mId=113"  # tentative
+    url: "https://www.msit.go.kr/bbs/list.do?sCode=user&mPid=112&mId=113"
     category_id: gov
     crawl_method: html
-    content_selector: ".board-list tbody tr"  # tentative
+    content_selector: ".board-list tbody tr"
     crawl_interval_min: 240
+    enabled: false  # tentative — pending owner review (ConnectError)
   - id: s7
     name: "디지털플랫폼정부"
-    url: "https://www.dpg.go.kr/contents/list.do?menuNo=11000003"  # tentative
+    url: "https://www.dpg.go.kr/contents/list.do?menuNo=11000003"
     category_id: gov
     crawl_method: html
-    content_selector: ".board-list tbody tr"  # tentative
+    content_selector: ".board-list tbody tr"
     crawl_interval_min: 360
+    enabled: false  # tentative — pending owner review (ConnectTimeout)
   - id: s8
     name: "개인정보보호위원회"
-    url: "https://www.pipc.go.kr/np/cop/bbs/selectBoardList.do?bbsId=BS074"  # tentative
+    url: "https://www.pipc.go.kr/np/cop/bbs/selectBoardList.do?bbsId=BS074"
     category_id: gov
     crawl_method: html
-    content_selector: ".board-list tbody tr"  # tentative
+    content_selector: ".board-list tbody tr"
     crawl_interval_min: 240
+    enabled: false  # tentative — pending owner review (ConnectError)
 
   # --- comp: 경쟁사 동향 ---------------------------------------------------
   - id: s9
     name: "KB국민은행 보도"
-    url: "https://www.kbstar.com/quics?page=C047075"  # tentative
+    url: "https://www.kbstar.com/quics?page=C047075"
     category_id: comp
     crawl_method: html
-    content_selector: ".press-list li"  # tentative
+    content_selector: ".press-list li"
     crawl_interval_min: 240
+    enabled: false  # tentative — pending owner review (Content-Type 비정상)
   - id: s10
     name: "하나은행 디지털"
-    url: "https://www.kebhana.com/cont/news/news_press/index.jsp"  # tentative
+    url: "https://www.kebhana.com/cont/news/news_press/index.jsp"
     category_id: comp
     crawl_method: html
-    content_selector: ".board-list tbody tr"  # tentative
+    content_selector: ".board-list tbody tr"  # tentative selector — verify after first crawl
     crawl_interval_min: 240
+    # verified 2026-05-10
   - id: s11
     name: "우리은행 뉴스룸"
-    url: "https://www.wooribank.com/pot/Dream?withyou=PRA0001"  # tentative
+    url: "https://www.wooribank.com/pot/Dream?withyou=PRA0001"
     category_id: comp
     crawl_method: html
-    content_selector: ".news-list li"  # tentative
+    content_selector: ".news-list li"
     crawl_interval_min: 240
+    enabled: false  # tentative — pending owner review (HTTP 404)
   - id: s12
     name: "NH농협 디지털혁신"
-    url: "https://www.nonghyup.com/Cyberpr/PressRelease/PressReleaseList.aspx"  # tentative
+    url: "https://www.nonghyup.com/Cyberpr/PressRelease/PressReleaseList.aspx"
     category_id: comp
     crawl_method: html
-    content_selector: ".board-list tbody tr"  # tentative
+    content_selector: ".board-list tbody tr"  # tentative selector — verify after first crawl
     crawl_interval_min: 240
+    # verified 2026-05-10
 
   # --- fin: 핀테크·빅테크 --------------------------------------------------
   - id: s13
     name: "카카오뱅크"
-    url: "https://www.kakaobank.com/news/notice"  # tentative
+    url: "https://www.kakaobank.com/news/notice"
     category_id: fin
     crawl_method: html
-    content_selector: ".notice-list li"  # tentative
+    content_selector: ".notice-list li"
     crawl_interval_min: 180
+    enabled: false  # tentative — pending owner review (HTTP 404)
   - id: s14
     name: "토스 블로그"
-    url: "https://blog.toss.im/"
+    url: "https://blog.toss.im/rss.xml"
     category_id: fin
     crawl_method: rss
     content_selector: null
     crawl_interval_min: 180
+    # verified 2026-05-10 (URL 보정: /rss.xml)
   - id: s15
     name: "네이버페이"
-    url: "https://campaign.naver.com/npay/notice/list"  # tentative
+    url: "https://campaign.naver.com/npay/notice/list"
     category_id: fin
     crawl_method: html
-    content_selector: ".notice-list li"  # tentative
+    content_selector: ".notice-list li"
     crawl_interval_min: 240
+    enabled: false  # tentative — pending owner review (HTTP 404)
   - id: s16
     name: "케이뱅크"
-    url: "https://www.kbanknow.com/ib20/mnu/BHP05000000"  # tentative
+    url: "https://www.kbanknow.com/ib20/mnu/BHP05000000"
     category_id: fin
     crawl_method: html
-    content_selector: ".board-list tbody tr"  # tentative
+    content_selector: ".board-list tbody tr"  # tentative selector — verify after first crawl
     crawl_interval_min: 240
+    # verified 2026-05-10
 
   # --- ai: AI·기술 동향 ----------------------------------------------------
   - id: s17
@@ -134,20 +151,23 @@ sites:
     crawl_method: html
     content_selector: "main article"
     crawl_interval_min: 240
+    # verified 2026-05-10
   - id: s18
     name: "OpenAI Blog"
     url: "https://openai.com/blog/"
     category_id: ai
     crawl_method: html
-    content_selector: "main article"  # tentative
+    content_selector: "main article"
     crawl_interval_min: 240
+    enabled: false  # tentative — pending owner review (HTTP 403, Cloudflare 차단)
   - id: s19
     name: "Microsoft Foundry"
-    url: "https://azure.microsoft.com/en-us/blog/product/azure-ai-foundry/"  # tentative
+    url: "https://azure.microsoft.com/en-us/blog/product/azure-ai-foundry/"
     category_id: ai
     crawl_method: html
-    content_selector: "main article"  # tentative
+    content_selector: "main article"  # tentative selector — verify after first crawl
     crawl_interval_min: 360
+    # verified 2026-05-10
   - id: s20
     name: "NVIDIA Developer"
     url: "https://developer.nvidia.com/blog/feed/"
@@ -155,79 +175,90 @@ sites:
     crawl_method: rss
     content_selector: null
     crawl_interval_min: 240
+    # verified 2026-05-10
 
   # --- sec: 보안·인프라 ----------------------------------------------------
   - id: s21
     name: "KISA"
-    url: "https://www.kisa.or.kr/2060201"  # tentative
+    url: "https://www.kisa.or.kr/2060201"
     category_id: sec
     crawl_method: html
-    content_selector: ".board-list tbody tr"  # tentative
+    content_selector: ".board-list tbody tr"
     crawl_interval_min: 240
+    enabled: false  # tentative — pending owner review (HTTP 500)
   - id: s22
     name: "보안뉴스"
-    url: "https://www.boannews.com/media/news_rss.xml"  # tentative
+    url: "https://www.boannews.com/media/news_rss.xml"
     category_id: sec
     crawl_method: rss
     content_selector: null
     crawl_interval_min: 120
+    # verified 2026-05-10
   - id: s23
     name: "KrCERT/CC"
-    url: "https://www.krcert.or.kr/data/secNoticeList.do"  # tentative
+    url: "https://www.krcert.or.kr/data/secNoticeList.do"
     category_id: sec
     crawl_method: html
-    content_selector: ".board-list tbody tr"  # tentative
+    content_selector: ".board-list tbody tr"
     crawl_interval_min: 180
+    enabled: false  # tentative — pending owner review (HTTP 404)
   - id: s24
     name: "KISIA"
-    url: "https://www.kisia.or.kr/news/notice/"  # tentative
+    url: "https://www.kisia.or.kr/news/notice/"
     category_id: sec
     crawl_method: html
-    content_selector: ".notice-list tbody tr"  # tentative
+    content_selector: ".notice-list tbody tr"  # tentative selector — verify after first crawl
     crawl_interval_min: 360
+    # verified 2026-05-10
 
   # --- mkt: 산업·시장 ------------------------------------------------------
   - id: s25
     name: "한국경제 핀테크"
-    url: "https://www.hankyung.com/feed/finance"  # tentative
+    url: "https://www.hankyung.com/feed/finance"
     category_id: mkt
     crawl_method: rss
     content_selector: null
     crawl_interval_min: 180
+    # verified 2026-05-10
   - id: s26
     name: "매일경제 금융"
-    url: "https://www.mk.co.kr/rss/50300008/"  # tentative
+    url: "https://www.mk.co.kr/rss/50300008/"
     category_id: mkt
     crawl_method: rss
     content_selector: null
     crawl_interval_min: 180
+    # verified 2026-05-10
   - id: s27
     name: "전자신문 IT"
-    url: "https://rss.etnews.com/Section902.xml"  # tentative
+    url: "https://rss.etnews.com/Section902.xml"
     category_id: mkt
     crawl_method: rss
     content_selector: null
     crawl_interval_min: 180
+    # verified 2026-05-10
 
   # --- res: 학회·연구 ------------------------------------------------------
   - id: s28
     name: "자본시장연구원"
-    url: "https://www.kcmi.re.kr/publications/pub_other_list"  # tentative
+    url: "https://www.kcmi.re.kr/publications/pub_other_list"
     category_id: res
     crawl_method: html
-    content_selector: ".publication-list li"  # tentative
+    content_selector: ".publication-list li"
     crawl_interval_min: 720
+    enabled: false  # tentative — pending owner review (HTTP 404)
   - id: s29
     name: "한국금융연구원(KIF)"
-    url: "https://www.kif.re.kr/kif4/publication/viewer_pubreport"  # tentative
+    url: "https://www.kif.re.kr/kif4/publication/viewer_pubreport"
     category_id: res
     crawl_method: html
-    content_selector: ".board-list tbody tr"  # tentative
+    content_selector: ".board-list tbody tr"  # tentative selector — verify after first crawl
     crawl_interval_min: 720
+    # verified 2026-05-10
   - id: s30
     name: "KISDI"
-    url: "https://www.kisdi.re.kr/report/list.do?cmsCd=CM0027"  # tentative
+    url: "https://www.kisdi.re.kr/report/list.do?cmsCd=CM0027"
     category_id: res
     crawl_method: html
-    content_selector: ".board-list tbody tr"  # tentative
+    content_selector: ".board-list tbody tr"
     crawl_interval_min: 720
+    enabled: false  # tentative — pending owner review (HTTP 404)

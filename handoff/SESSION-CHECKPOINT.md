@@ -64,36 +64,43 @@ If the checkpoint is recent and complete, skip all other files.
 
 Date: 2026-05-10
 Architect: Senior Technical Lead
-Status: IDLE (Step 2 deployed)
+Status: IDLE (Step 3 deployed)
 
 ## What's Done
 
 - Step 1: FastAPI + RSS 수집 — ✅ deployed 2026-05-09
-- **Step 2: Watchtower Foundation (DB + Seed + UI Shell) — ✅ deployed 2026-05-10**
-  - 신규 11 파일 + 수정 5 파일
-  - SQLAlchemy 2.0 + SQLite WAL — 4 도메인 모델 (User/Category/Site/Item)
-  - yaml seed 멱등 적재 (8 카테고리 / 30 사이트 / 1 사용자)
-  - 5 GET API: `/api/categories|sites|items|users/me|health`
-  - `static/watchtower.html` (prototype 디자인 보존, 인라인 데이터 → fetch)
-  - events.jsonl → Item 임시 import 브리지
-  - 83 tests passing (기존 67 + 신규 16, 0 skipped)
-  - Reviewer APPROVED, Conditions 0건
+- Step 2: Watchtower Foundation (DB + Seed + UI Shell) — ✅ deployed 2026-05-10
+- **Step 3: Watchtower Crawler + Detector + Items 적재 — ✅ deployed 2026-05-10**
+  - 신규 패키지 `monitor/watchtower/` (base/robots/rss/html/detector/worker 6 모듈)
+  - `scripts/verify_seed_urls.py` (사이트 URL 검증 utility, 정식 home 승격)
+  - `tests/test_watchtower_crawler.py` (21 hermetic 테스트)
+  - `app/db/models.py`: Item.id `default=lambda: uuid.uuid4().hex`, Site.enabled boolean 컬럼
+  - `config/seed_sites.yaml`: 14 verified / 1 URL 보정(s14 토스 RSS) / 15 enabled=false
+  - `main.py`: WatchtowerWorker lifespan + enabled 사이트 사이트별 APScheduler interval + `POST /api/trigger-watchtower` 202
+  - `requirements.txt`: httpx + beautifulsoup4 + lxml 추가
+  - 104 tests passing (83 baseline + 21 new), 0 skipped
+  - Reviewer APPROVED, Conditions 0건 (3 escalations 처리)
+  - 1회 트리거 검증: 9 사이트 성공 + 239 items 적재
 
 ## What's Next
 
-다음 세션 시작 시 → **Step 3: Crawler + Detector + Items 적재**
+다음 세션 시작 시 → **Step 4: Subscriptions + Notifier**
 
-1. **Step 2 escalation 처리** (Step 3 첫 작업):
-   - 30 사이트 URL/selector tentative 검토 — Owner 컨펌 후 실 URL/HTML 구조 확인 (특히 reg/comp/sec)
-   - `app/db/models.py` Item.id 에 `default=lambda: uuid.uuid4().hex` 추가
-2. **Watchtower 전용 RSS/HTML 크롤러 작성** (FR-CRL-001~008, FR-DET-001/002)
-   - feedparser RSS path
-   - httpx + BS4 HTML path
-   - 사이트별 `crawl_interval_min` 강제 (60분 minimum)
-   - 도메인당 동시 1 요청 제한
-3. **NEW Detector + Items 적재** — content_hash (SHA-256) 기반 dedup
-4. **APScheduler Watchtower 통합** — 사이트별 interval로 스케줄링
-5. **legacy import 단계 deprecate** — Step 3 크롤러로 전환
+1. **Step 3 escalation 후속**:
+   - HTML 크롤러 selector 추정값 보정 (s10, s12, s16, s19, s24, s29 — `# tentative selector` 표시 사이트)
+   - enabled=false 15개 사이트 Owner 검토 (사내망 전용 URL/대체 endpoint 발굴)
+2. **Subscriptions REST API** (FR-SUB-001~005)
+   - `subscriptions` 테이블 신설 (user_id, category_id, channel)
+   - `GET/PATCH /api/subscriptions` (자기 구독만 조회·수정)
+   - UI localStorage → 서버 영속 전환 (별/벨 토글, 채널 instant/digest/off)
+   - `PATCH /api/items/{id}/read` (읽음 처리 영속)
+3. **Notifier — SMTP 즉시 + 다이제스트** (FR-NOTIF-001~008)
+   - 즉시: ⭐+🔔 둘 다 켠 카테고리 → 60초 이내 메일
+   - 다이제스트: 매일 09:00 KST → 직전 24h 묶음
+   - Step 1 SMTP 모듈(`monitor/notifier.py`) 패턴 재사용 검토
+   - 5회 실패 시 site owner 알림 (logger.error → 실 메일로 승격)
+4. **alert_log 영속** (FR-NOTIF-005) — `alert_log` 테이블 신설
+5. **Spec v0.2 보완** (B1~B4) — 별도 사이클 또는 Step 4 후미
 
 ## Current Brief
 
@@ -137,7 +144,7 @@ Status: IDLE (Step 2 deployed)
 | Step | 주제 | Spec FR | 예상 |
 |---|---|---|---|
 | 2 ✅ | DB + Seed + UI Shell | FR-CAT-001/002, FR-SITE-001/003, FR-USR-001, FR-FEED-001/002/004/005 | 완료 |
-| 3 | Crawler + Detector + Items | FR-CRL-001~008, FR-DET-001/002, FR-SITE-005/006 | 2일 |
+| 3 ✅ | Crawler + Detector + Items | FR-CRL-001~008, FR-DET-001/002, FR-SITE-005/006 | 완료 |
 | 4 | Subscriptions + Notifier | FR-SUB-001~005, FR-NOTIF-001~008 | 2일 |
 | 5 | Audit + Auth + Deploy | FR-AUDIT-001~003, FR-USR-002~004, NFR-COMP-002 | 2일 |
 
@@ -153,7 +160,7 @@ Status: IDLE (Step 2 deployed)
 
 - Branch: claude/stoic-meitner-47d182 (worktree) → master push 완료
 - Remote: `https://github.com/2hryul2/webcrolling.git`
-- Last commit: `[Step 2] Watchtower Foundation: DB + Seed + UI Shell`
+- Last commit: `[Step 3] Watchtower Crawler + Detector + Items 적재`
 - Uncommitted files: (push 완료 후 깨끗)
 
 ## Resume Prompt (다음 세션 시작 시 사용)

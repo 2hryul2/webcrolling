@@ -92,6 +92,7 @@ def _seed_sites(session: Session, rows: list[dict[str, Any]]) -> int:
             content_selector=row.get("content_selector"),
             crawl_interval_min=int(row.get("crawl_interval_min", 60) or 60),
             status=row.get("status", "ok"),
+            enabled=bool(row.get("enabled", True)),
         ))
         inserted += 1
     return inserted

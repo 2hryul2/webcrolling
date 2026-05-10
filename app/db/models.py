@@ -19,10 +19,11 @@ Decisions enforced here:
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import DateTime, ForeignKey, String, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, UniqueConstraint
 from sqlalchemy.orm import (
     DeclarativeBase,
     Mapped,
@@ -78,6 +79,7 @@ class Site(Base):
     content_selector: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     crawl_interval_min: Mapped[int] = mapped_column(default=MIN_CRAWL_INTERVAL_MIN)
     status: Mapped[str] = mapped_column(String(16), default="ok")  # ok|delayed|failed|blocked
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     last_ok_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -107,7 +109,11 @@ class Item(Base):
     __tablename__ = "items"
     __table_args__ = (UniqueConstraint("site_id", "url", name="uq_site_url"),)
 
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    id: Mapped[str] = mapped_column(
+        String(32),
+        primary_key=True,
+        default=lambda: uuid.uuid4().hex,
+    )
     site_id: Mapped[str] = mapped_column(ForeignKey("sites.id"))
     type: Mapped[str] = mapped_column(String(8), default="NEW")  # NEW|CHANGE
     title: Mapped[str] = mapped_column(String(500))

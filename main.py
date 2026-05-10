@@ -7,19 +7,25 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import uuid
+
 import yaml
 from dotenv import load_dotenv
-from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi import BackgroundTasks, FastAPI, Query
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+from sqlalchemy import select
 
 from app.database import validate_jsonl_file
 from app.db.import_legacy import import_legacy_events
+from app.db.models import Site
 from app.db.seed import run_seed
 from app.db.session import SessionLocal, init_db
 from app.routes.status import router as status_router
 from app.routes.watchtower import router as watchtower_router
 from app.scheduler import setup_scheduler
+from monitor.watchtower.worker import WatchtowerWorker
 from monitor.worker import Worker
 
 # Paths
@@ -99,6 +105,38 @@ async def lifespan(app: FastAPI):
     )
     sources_config = _load_sources_config()
     scheduler = setup_scheduler(worker, sources_config)
+
+    # Step 3 — Watchtower fleet scheduling (one job per enabled Site).
+    watchtower_worker = WatchtowerWorker(SessionLocal)
+    app.state.watchtower_worker = watchtower_worker
+
+    registered = 0
+    skipped = 0
+    try:
+        with SessionLocal() as session:
+            sites = session.execute(select(Site).order_by(Site.id)).scalars().all()
+            for site in sites:
+                if not site.enabled:
+                    skipped += 1
+                    continue
+                scheduler.add_job(
+                    watchtower_worker.run_site,
+                    "interval",
+                    minutes=int(site.crawl_interval_min or 60),
+                    args=[site.id],
+                    id=f"watchtower_{site.id}",
+                    replace_existing=True,
+                    coalesce=True,
+                    max_instances=1,
+                )
+                registered += 1
+        logger.info(
+            "Watchtower scheduler: %d sites registered (%d skipped — disabled)",
+            registered, skipped,
+        )
+    except Exception as exc:
+        logger.warning("Watchtower scheduler setup failed: %s", exc)
+
     scheduler.start()
 
     app.state.worker = worker
@@ -112,6 +150,10 @@ async def lifespan(app: FastAPI):
             scheduler.shutdown(wait=False)
         except Exception as exc:
             logger.warning("Scheduler shutdown error: %s", exc)
+        try:
+            watchtower_worker.shutdown(wait=False)
+        except Exception as exc:
+            logger.warning("Watchtower worker shutdown error: %s", exc)
         logger.info("Application shutdown complete")
 
 
@@ -133,3 +175,59 @@ def root() -> dict[str, str]:
 def ui() -> FileResponse:
     """Serve the Watchtower prototype UI (Step 2 entry point)."""
     return FileResponse(STATIC_DIR / "watchtower.html", media_type="text/html; charset=utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Step 3 — Watchtower trigger endpoint
+# ---------------------------------------------------------------------------
+
+
+class WatchtowerTriggerBody(BaseModel):
+    site_id: str | None = None
+
+
+def _watchtower_run(worker: WatchtowerWorker, site_id: str | None) -> None:
+    """BackgroundTasks shim — never raise out of a background task."""
+    try:
+        if site_id:
+            worker.run_site(site_id)
+        else:
+            worker.run_all()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Watchtower trigger failed: %s", type(exc).__name__)
+
+
+@app.post("/api/trigger-watchtower", status_code=202)
+def trigger_watchtower(
+    background_tasks: BackgroundTasks,
+    body: WatchtowerTriggerBody | None = None,
+    site_id: str | None = Query(default=None),
+) -> JSONResponse:
+    """Queue a Watchtower crawl pass and return 202 Accepted.
+
+    Body and query parameter are both accepted for ``site_id``; an empty/
+    omitted value triggers all enabled sites.
+    """
+    target = (body.site_id if body and body.site_id else None) or site_id
+    job_id = uuid.uuid4().hex
+    worker: WatchtowerWorker | None = getattr(app.state, "watchtower_worker", None)
+    if worker is None:
+        return JSONResponse(
+            status_code=202,
+            content={
+                "job_id": job_id,
+                "site_id": target,
+                "status": "queued",
+                "message": "Trigger accepted (worker not ready — will be a no-op)",
+            },
+        )
+    background_tasks.add_task(_watchtower_run, worker, target)
+    return JSONResponse(
+        status_code=202,
+        content={
+            "job_id": job_id,
+            "site_id": target,
+            "status": "queued",
+            "message": "Trigger accepted",
+        },
+    )

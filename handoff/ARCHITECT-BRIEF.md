@@ -4,394 +4,406 @@ Work specification for Builder.
 
 ---
 
-## Step 2 — Watchtower Foundation: DB + Seed + UI Shell
+## Step 3 — Watchtower Crawler + Detector + Items 적재
 
 ### What
 
-Watchtower 제품의 첫 사이클. SQLite + SQLAlchemy 도메인 모델 + yaml seed + 5개 GET API + prototype HTML을 정적 자원으로 통합. Step 1 RSS 시스템(JSONL/`/events`/`/alerts`)은 그대로 보존하며 새 영역만 추가.
+Watchtower 전용 RSS/HTML 크롤러 + NEW 감지기 + 사이트별 스케줄링을 추가하여, Step 2의 `/api/items` 가 실제 외부 사이트에서 수집한 데이터로 채워지도록 한다. Step 1 RSS 시스템(dart/fsc → events.jsonl)은 그대로 보존하면서, 새로 도입되는 Watchtower Worker는 SQLite `items` 테이블에 직접 적재한다.
 
 ```
-사용자(브라우저) → /ui (FastAPI FileResponse)
-                    ↓
-            static/watchtower.html
-                    ↓ fetch
-              /api/categories | /api/sites | /api/items | /api/users/me | /api/health
-                    ↓
-              SQLAlchemy ORM (sync session)
-                    ↓
-              data/watchtower.sqlite (WAL)
-                    ↑ startup
-              seed_categories.yaml + seed_sites.yaml + seed_users.yaml
-              + (선택) data/events.jsonl → Item import
+APScheduler (사이트별 interval, 60분 minimum)
+   ↓ trigger per site
+WatchtowerWorker.run_site(site_id)
+   ↓ domain lock (FR-CRL-006)
+RobotsChecker.is_allowed(url, UA)  ─── disallowed → site.status='blocked' (FR-SITE-005)
+   ↓ allowed
+Crawler (rss | html)
+   - rss → feedparser
+   - html → httpx (timeout 30s) + BeautifulSoup → content_selector
+   ↓ 외부 URL · 본문 추출
+Detector
+   - SHA-256 content_hash
+   - (site_id, url) unique check
+   - 신규 → Item(type='NEW') 생성 + 기존 read_by='' 빈 CSV
+   ↓
+SessionLocal.commit() → items 테이블
+   ↓
+site.status = 'ok' / 'failed' (5회 연속 → failed + 카테고리 owner 1회 알림 (FR-SITE-006))
+   ↓
+/api/items GET → 실데이터 표시
 ```
 
 ### Why
 
-- ideation `subscribe-watch_20260510_1029.md` + spec `spec_20260510_1029.md` 의 Phase 1 MVP 진입
-- prototype UI를 FastAPI 백엔드와 처음 통합 → 시각적 마일스톤
-- Step 3 (크롤러+Detector)·Step 4 (Subscriptions+Notifier) 의 토대 마련
+- Step 2에서 UI shell + DB seed까지 완성. 현재 `/api/items` 가 비어있어 사용자에게 가치 0.
+- ideation §9 단계 3+4 (RSS 크롤러 + APScheduler 통합) 의 본 사이클.
+- spec FR-CRL-001~008 + FR-DET-001/002 + FR-SITE-005/006 충족.
+- Step 4 (Subscriptions/Notifier) 이전에 알림 보낼 데이터가 존재해야 함.
 
 ### Requirements
 
-#### 1. 의존성 (`requirements.txt`)
-- `sqlalchemy>=2.0,<3.0` 추가
-- `aiosqlite`/`alembic` 미추가 (Step 5에서 검토)
-- 나머지 Step 1 의존성 그대로
+#### 3.1 Step 2 escalation 처리 (선행 작업)
 
-#### 2. DB 인프라 (`app/db/`)
-
-`app/db/__init__.py` — 빈 패키지
-
-`app/db/session.py`:
-- `engine = create_engine("sqlite:///data/watchtower.sqlite", future=True, connect_args={"check_same_thread": False})`
-- connection 시 `PRAGMA journal_mode=WAL`, `PRAGMA foreign_keys=ON`
-- `SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)`
-- `def get_session() -> Iterator[Session]` (FastAPI `Depends`)
-- `def init_db() -> None` — `Base.metadata.create_all(engine)` + 데이터 파일 권한 0o600 (Windows no-op)
-
-`app/db/models.py`:
+**3.1a. `app/db/models.py` — Item.id default 추가:**
 ```python
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
-
-class Base(DeclarativeBase): pass
-
-class Category(Base):
-    __tablename__ = "categories"
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    name: Mapped[str] = mapped_column(String(100))
-    owner_dept: Mapped[str] = mapped_column(String(100))
-    owner_user_id: Mapped[str | None] = mapped_column(String(32), ForeignKey("users.id"), nullable=True)
-    sites: Mapped[list["Site"]] = relationship(back_populates="category")
-
-class Site(Base):
-    __tablename__ = "sites"
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    name: Mapped[str] = mapped_column(String(200))
-    url: Mapped[str] = mapped_column(String(500))
-    category_id: Mapped[str] = mapped_column(ForeignKey("categories.id"))
-    crawl_method: Mapped[str] = mapped_column(String(8))  # 'rss'|'html'|'js'
-    content_selector: Mapped[str | None] = mapped_column(String(200), nullable=True)
-    crawl_interval_min: Mapped[int] = mapped_column(default=60)  # FR-SITE-003 — 최소 60 강제 (validator)
-    status: Mapped[str] = mapped_column(String(16), default="ok")  # ok|delayed|failed|blocked
-    last_ok_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    category: Mapped["Category"] = relationship(back_populates="sites")
-    items: Mapped[list["Item"]] = relationship(back_populates="site")
+import uuid
+from sqlalchemy.orm import mapped_column
 
 class Item(Base):
-    __tablename__ = "items"
-    __table_args__ = (UniqueConstraint("site_id", "url", name="uq_site_url"),)
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    site_id: Mapped[str] = mapped_column(ForeignKey("sites.id"))
-    type: Mapped[str] = mapped_column(String(8), default="NEW")  # NEW|CHANGE
-    title: Mapped[str] = mapped_column(String(500))
-    summary: Mapped[str | None] = mapped_column(String(2000), nullable=True)
-    url: Mapped[str] = mapped_column(String(500))
-    content_hash: Mapped[str] = mapped_column(String(64))  # SHA-256
-    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    read_by: Mapped[str] = mapped_column(String(500), default="")  # CSV of user_ids
-    site: Mapped["Site"] = relationship(back_populates="items")
+    id: Mapped[str] = mapped_column(
+        String(32),
+        primary_key=True,
+        default=lambda: uuid.uuid4().hex,
+    )
+```
+- legacy import의 `content_hash[:32]` 명시 세팅과 공존 (default는 명시 세팅 시 미사용).
+- 기존 `tests/test_watchtower.py::test_item_legacy_id` 등이 깨지지 않도록 검증.
 
-class User(Base):
-    __tablename__ = "users"
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    name: Mapped[str] = mapped_column(String(100))
-    dept: Mapped[str] = mapped_column(String(100))
-    email: Mapped[str] = mapped_column(String(200), unique=True)
-    messenger_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    role: Mapped[str] = mapped_column(String(16), default="member")  # member|owner|operator
+**3.1b. `config/seed_sites.yaml` — 사이트 URL 검증 + tentative 정리:**
+- 30개 사이트 중 `# tentative` 주석 달린 항목들의 URL 정확도 점검.
+- Builder 작업 흐름:
+  1. 각 URL에 `httpx.head()` 또는 `httpx.get()` (timeout 10s)으로 응답 확인
+  2. 200 OK + Content-Type 확인:
+     - `crawl_method: rss` → `application/rss+xml`, `application/atom+xml`, `application/xml`, `text/xml` 중 하나여야 통과
+     - `crawl_method: html` → `text/html` 통과
+  3. 실패한 사이트는 yaml에서 다음 중 하나로 처리:
+     - URL 보정 가능 (예: `/news` → `/news/list`) → 새 URL로 교체 + `# verified` 주석
+     - 보정 불가 → `enabled: false` 필드 추가 + `# tentative — pending owner review` 주석 유지 (추후 Owner가 검토)
+  4. 통과한 사이트는 `# verified 2026-05-10` 주석으로 마킹
+- **모델에 `enabled` 컬럼 추가** (Site model + sites 테이블):
+  - `enabled: Mapped[bool] = mapped_column(default=True)`
+  - 크롤러는 `enabled=False` 사이트를 skip
+  - seed 로더가 yaml의 `enabled` 필드를 반영
+- 폐쇄망 시뮬레이션: 외부 사이트 접근 차단된 환경에서 작업 시 — Builder 가 접근 가능한 사이트만 우선 검증, 나머지는 `enabled=false` 마킹 후 BUILD-LOG에 결과 표 등재.
+
+#### 3.2 신규 의존성 (`requirements.txt`)
+- `httpx>=0.27,<0.30` — Step 1의 `requests`/`feedparser`와 별개로 신규 추가
+- `beautifulsoup4>=4.12,<5.0`
+- `lxml>=5.0,<6.0` (BeautifulSoup 파서, Windows wheel 안정)
+- 기존 `feedparser`(Step 1) 재사용
+
+#### 3.3 디렉토리 구조 (신규 패키지)
+
+```
+monitor/watchtower/
+├── __init__.py
+├── base.py            # 공통 데이터클래스 + abc Crawler
+├── robots.py          # robots.txt fetch + 캐시 + is_allowed
+├── rss.py             # RssCrawler (feedparser 기반)
+├── html.py            # HtmlCrawler (httpx + BS4)
+├── detector.py        # SHA-256 content_hash + NEW 판정
+└── worker.py          # WatchtowerWorker — domain lock, 5회 실패 카운터, run_site()
 ```
 
-- FR-SITE-003 강제: `Site.__init__` 에서 `crawl_interval_min < 60` 시 60으로 clamp + 경고 로그.
-- `Item.read_by` 는 CSV 문자열 (예: `"u1,u2"`); set 변환 헬퍼 `Item.read_by_set()` / `Item.mark_read(user_id)` 메서드 추가.
+기존 `monitor/collectors/{rss,dart,fsc}.py` 와 충돌 없음 — Step 1 collectors는 그대로 두고 신규 watchtower 패키지 추가.
 
-#### 3. Seed (`config/seed_categories.yaml` · `config/seed_sites.yaml` · `config/seed_users.yaml`)
+#### 3.4 base.py — 공통 인터페이스
 
-`config/seed_categories.yaml` (8개, prototype CATEGORIES와 동일):
-```yaml
-categories:
-  - id: reg
-    name: 금융 규제·감독
-    owner_dept: 컴플라이언스
-  - id: gov
-    name: 정부·정책
-    owner_dept: 전략기획
-  - id: comp
-    name: 경쟁사 동향
-    owner_dept: AX팀
-  - id: fin
-    name: 핀테크·빅테크
-    owner_dept: 디지털전략
-  - id: ai
-    name: AI·기술 동향
-    owner_dept: AX팀
-  - id: sec
-    name: 보안·인프라
-    owner_dept: 정보보안
-  - id: mkt
-    name: 산업·시장
-    owner_dept: 리서치
-  - id: res
-    name: 학회·연구
-    owner_dept: 리서치
-```
-
-`config/seed_sites.yaml` (30개, prototype SITES 배열 그대로 — id `s1`~`s30`):
-- 각 항목: `id`, `name`, `url`, `category_id`, `crawl_method`(`rss`|`html`), `content_selector`(html이면 명시, rss는 null), `crawl_interval_min`
-- URL은 ideation §부록 A 그대로 (없는 항목은 합리적 추정 — 단, Builder가 명시적으로 가짜 URL인지 마킹). 실제 URL 검증은 Step 3.
-- 예시:
-  ```yaml
-  sites:
-    - id: s1
-      name: 금융위원회
-      url: https://www.fsc.go.kr/no010101
-      category_id: reg
-      crawl_method: html
-      content_selector: "#content .board-list"
-      crawl_interval_min: 120
-    - id: s17
-      name: Anthropic News
-      url: https://www.anthropic.com/news
-      category_id: ai
-      crawl_method: html
-      content_selector: "main article"
-      crawl_interval_min: 240
-    # ... s2~s30
-  ```
-
-`config/seed_users.yaml`:
-```yaml
-users:
-  - id: u1
-    name: 운영자
-    dept: AX팀
-    email: ${WATCHTOWER_ADMIN_EMAIL:-admin@watchtower.local}
-    role: operator
-```
-- yaml 로더에서 `${VAR:-default}` 치환 처리.
-
-`app/db/seed.py`:
-- `def run_seed(session: Session) -> dict` — 카테고리·사이트·사용자 로드. `INSERT OR IGNORE` 의미 (id 중복 시 skip). 변경된 행 count 반환.
-- yaml 로드 시 `${VAR}` 치환은 `os.path.expandvars` + 정규식 `${VAR:-default}` 처리.
-- 멱등: 두 번 실행해도 row 수 동일.
-
-#### 4. Step 1 데이터 브리지 (`app/db/import_legacy.py`, 선택적)
-- `def import_legacy_events(session: Session, jsonl_path: str) -> int` — events.jsonl 읽어 Item 생성
-- 매핑: `source='dart' or 'fsc' → site_id='s1'` (임시), `category_id='reg'`
-- `content_hash` 는 events.jsonl의 동일 필드 사용
-- 이미 동일 `(site_id, url)` 존재 시 skip (UniqueConstraint)
-- detected_at 은 events.jsonl 의 `fetched_at` 사용
-- 실패해도 startup 진행 (try/except + warning)
-
-#### 5. REST API (`app/routes/watchtower.py`)
-
-응답은 모두 JSON, UTF-8.
-
-`GET /api/categories`:
-```json
-[
-  {"id": "reg", "name": "금융 규제·감독", "owner_dept": "컴플라이언스",
-   "sites_count": 4, "item_count_unread": 12}
-]
-```
-- `sites_count` = 해당 카테고리의 활성 site 수
-- `item_count_unread` = me.id가 read_by에 없는 item 수 (subquery 또는 Python 후처리)
-
-`GET /api/sites`:
-```json
-[{"id": "s1", "name": "금융위원회", "url": "...", "category_id": "reg",
-  "crawl_method": "html", "status": "ok", "last_ok_at": null}]
-```
-
-`GET /api/items?category=reg&type=NEW&limit=200`:
-```json
-[{"id": "...", "site_id": "s1", "site_name": "금융위원회",
-  "category_id": "reg", "type": "NEW", "title": "...", "summary": "...",
-  "url": "...", "detected_at": "2026-05-09T...Z", "read": false}]
-```
-- 정렬: `read ASC, detected_at DESC` (FR-FEED-004)
-- `limit` 1~1000 (default 200)
-- `category` 누락 시 전체
-
-`GET /api/users/me`:
-```json
-{"id": "u1", "name": "운영자", "dept": "AX팀",
- "email": "...", "role": "operator"}
-```
-- 환경변수 `WATCHTOWER_ADMIN_EMAIL` 매칭되는 사용자 반환. 없으면 첫 사용자.
-
-`GET /api/health`:
-```json
-{"ok": true, "db": "connected", "sites_total": 30, "sites_failed": 0,
- "uptime_seconds": 1234, "now": "..."}
-```
-
-기존 `/`, `/status`, `/events`, `/alerts`, `/trigger` 보존.
-
-#### 6. 정적 자원 (`static/watchtower.html`)
-
-- `ideation/watchtower-prototype.html` 을 `static/watchtower.html` 로 복사
-- `<script>` 안의 `const CATEGORIES = [...]; const SITES = [...]; const ITEMS = [...];` 를 startup fetch 로 교체:
-  ```js
-  let CATEGORIES = [];
-  let SITES = [];
-  let ITEMS = [];
-  let ME = null;
-
-  async function bootData() {
-    const [cats, sites, items, me] = await Promise.all([
-      fetch('/api/categories').then(r => r.json()),
-      fetch('/api/sites').then(r => r.json()),
-      fetch('/api/items?limit=200').then(r => r.json()),
-      fetch('/api/users/me').then(r => r.json()),
-    ]);
-    CATEGORIES = cats;
-    SITES = sites;
-    // /api/items 응답을 prototype의 ITEMS 형식으로 매핑
-    ITEMS = items.map(it => ({
-      id: it.id,
-      siteId: it.site_id,
-      cat: it.category_id,
-      type: it.type,
-      title: it.title,
-      summary: it.summary || '',
-      detected: formatRelative(it.detected_at),  // 1시간 전 등
-      read: it.read,
-    }));
-    ME = me;
-    renderAll();
-  }
-
-  function formatRelative(iso) {
-    const d = new Date(iso);
-    const diffMin = Math.floor((Date.now() - d.getTime()) / 60000);
-    if (diffMin < 60) return `${diffMin}분 전`;
-    if (diffMin < 1440) return `${Math.floor(diffMin/60)}시간 전`;
-    if (diffMin < 2880) return '어제';
-    return `${Math.floor(diffMin/1440)}일 전`;
-  }
-
-  // 기존 init 호출(`renderAll()`)을 `bootData()` 로 교체.
-  ```
-- subscriptions·alertOn·channel localStorage 그대로 (Step 4에서 API 통합)
-- markRead → 일단 mock (`item.read = true; renderAll()`). Step 4에서 `PATCH /api/items/{id}/read` 로 교체.
-- 검색 input 동작 그대로
-- topbar avatar `AT` → `ME.name[0]` 동적
-
-#### 7. main.py 변경
-
-- `from fastapi.staticfiles import StaticFiles` / `FileResponse`
-- lifespan 내부:
-  ```python
-  init_db()
-  with SessionLocal() as session:
-      run_seed(session)
-      try:
-          import_legacy_events(session, str(DATA_DIR / "events.jsonl"))
-      except Exception as e:
-          logger.warning("Legacy import skipped: %s", e)
-  ```
-- `app.include_router(watchtower_router)`
-- `app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")`
-- `@app.get("/ui")` → `FileResponse(BASE_DIR / "static" / "watchtower.html")`
-
-#### 8. 테스트 (`tests/test_watchtower.py`)
-
-`tests/conftest.py` 에 fixture 추가:
 ```python
-@pytest.fixture
-def watchtower_db(tmp_path):
-    from app.db.session import Base, engine_for_path, sessionmaker_for_engine
-    db_path = tmp_path / "test.sqlite"
-    engine = engine_for_path(str(db_path))
-    Base.metadata.create_all(engine)
-    SessionLocal = sessionmaker_for_engine(engine)
-    yield SessionLocal
-    Base.metadata.drop_all(engine)
+from dataclasses import dataclass, field
+from abc import ABC, abstractmethod
+from datetime import datetime, timezone
+
+USER_AGENT = "Watchtower/1.0 (+https://watchtower.shinhan.local)"  # FR-CRL-005
+DEFAULT_TIMEOUT_SEC = 30  # FR-CRL-008
+
+@dataclass
+class CrawledItem:
+    title: str
+    url: str
+    summary: str | None
+    published_at: datetime | None  # 사이트가 제공할 때만
+    content_for_hash: str  # SHA-256 입력 — title + url + summary
+
+@dataclass
+class CrawlResult:
+    site_id: str
+    items: list[CrawledItem] = field(default_factory=list)
+    error: str | None = None  # 실패 시 메시지
+    blocked_by_robots: bool = False
+    duration_ms: int = 0
+
+class Crawler(ABC):
+    @abstractmethod
+    def crawl(self, site, *, user_agent: str, timeout_sec: int) -> CrawlResult:
+        ...
 ```
-(이를 위해 `app/db/session.py` 에 `engine_for_path()`·`sessionmaker_for_engine()` 헬퍼 추가)
 
-테스트 항목:
-- `test_models_create_relationships` — Category·Site·Item·User 생성 + relationship 확인
-- `test_seed_idempotent` — `run_seed` 2회 실행 후 row 수 동일
-- `test_seed_loads_8_categories_30_sites_1_user`
-- `test_site_crawl_interval_clamp` — 30분 입력 시 60으로 clamp
-- `test_api_categories_smoke` — TestClient `GET /api/categories` 200 + 8건
-- `test_api_sites_smoke` — `GET /api/sites` 200 + 30건
-- `test_api_items_smoke` — 빈 DB에서 200 + 빈 배열, 항목 추가 후 정렬 확인
-- `test_api_users_me_smoke` — `WATCHTOWER_ADMIN_EMAIL` 환경변수 매칭
-- `test_api_health_smoke` — ok=true
-- `test_ui_html_response` — `GET /ui` 200 + content-type text/html + body에 `Watchtower` 포함
-- `test_static_files_mount` — `GET /static/watchtower.html` 200
-- `test_legacy_import_idempotent` — 동일 events.jsonl 2회 import 시 Item count 동일
+#### 3.5 robots.py — robots.txt 검증
 
-기존 67 tests 모두 통과 유지.
+```python
+import urllib.robotparser
+from urllib.parse import urlparse
+
+# 도메인별 RobotFileParser 캐시 (TTL 6시간)
+_robots_cache: dict[str, tuple[float, urllib.robotparser.RobotFileParser]] = {}
+
+def is_allowed(url: str, user_agent: str, *, timeout_sec: int = 10) -> bool:
+    """url 의 path가 user_agent에게 robots.txt에서 허용되는지.
+    
+    - 도메인별로 robots.txt를 1회 fetch 후 6시간 캐시
+    - robots.txt 자체가 404/타임아웃이면 True (관용적)
+    - Disallow 매칭이면 False
+    """
+```
+
+- httpx로 fetch (urllib.robotparser는 내부적으로 urllib을 쓰는데, 명시적으로 httpx로 fetch 후 `parse()` 호출하여 timeout 강제)
+- Step 1의 retry 패턴 재사용 (3회, 1/2/4s 백오프)
+- 실패 시 정책: **fail-open** (robots.txt를 못 읽으면 일단 허용). 폐쇄망에서 robots.txt가 자주 누락됨 + over-blocking 방지.
+
+#### 3.6 rss.py — RssCrawler
+
+```python
+class RssCrawler(Crawler):
+    def crawl(self, site, *, user_agent, timeout_sec):
+        # feedparser는 timeout 직접 미지원 → httpx로 fetch 후 feedparser.parse(content) 호출
+        # User-Agent 헤더 명시
+        # entries에서 title, link, summary, published_parsed 추출
+        # CrawledItem 변환
+        # 실패 시 CrawlResult.error 세팅
+```
+
+- feedparser는 잘못된 XML도 lenient 파싱 — bozo flag 검사. bozo=1 이고 entries=0 이면 error 처리.
+- `published_parsed` (struct_time) → UTC datetime 변환.
+
+#### 3.7 html.py — HtmlCrawler
+
+```python
+class HtmlCrawler(Crawler):
+    def crawl(self, site, *, user_agent, timeout_sec):
+        # httpx.get(url, headers={'User-Agent': ua}, timeout=timeout_sec, follow_redirects=True)
+        # BeautifulSoup(html, 'lxml')
+        # site.content_selector로 본문 영역 추출
+        # 그 안의 <a href> 들을 후보 항목으로
+        # 동일 페이지 + 절대 URL 만으로 (urljoin)
+        # title = anchor text, url = href, summary = anchor.parent.text 일부
+```
+
+- selector가 매칭 0개면 `error="content_selector matched no elements"` 세팅
+- redirect 따라가되 최대 5회
+
+#### 3.8 detector.py — NEW 감지
+
+```python
+import hashlib
+
+def sha256_hash(content: str) -> str:
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()  # 64-char hex
+
+def detect_new_items(
+    session, site_id: str, crawled: list[CrawledItem]
+) -> list[Item]:
+    """이미 (site_id, url) 존재하면 skip. 신규는 Item 생성."""
+    existing_urls = {row.url for row in
+                     session.execute(select(Item.url).where(Item.site_id == site_id)).all()}
+    new_items = []
+    for c in crawled:
+        if c.url in existing_urls:
+            continue
+        item = Item(
+            site_id=site_id,
+            type="NEW",
+            title=c.title[:500],
+            summary=(c.summary or "")[:2000],
+            url=c.url,
+            content_hash=sha256_hash(c.content_for_hash),
+            detected_at=datetime.now(timezone.utc),
+            read_by="",
+        )
+        new_items.append(item)
+    return new_items
+```
+
+- Item.id 는 default lambda(uuid.uuid4().hex)로 자동 부여 (3.1a).
+- (site_id, url) 유니크 제약은 Step 2에서 이미 존재.
+
+#### 3.9 worker.py — WatchtowerWorker
+
+```python
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urlparse
+
+class WatchtowerWorker:
+    def __init__(self, session_factory, *, max_workers: int = 5):
+        self._session_factory = session_factory
+        self._executor = ThreadPoolExecutor(max_workers=max_workers)
+        self._domain_locks: dict[str, threading.Lock] = {}
+        self._domain_locks_master = threading.Lock()
+        self._in_progress: set[str] = set()  # site_id 진행중 (FR-CRL-007)
+        self._in_progress_lock = threading.Lock()
+        self._failure_counters: dict[str, int] = {}  # site_id → 연속 실패 수
+        self._failure_notified: set[str] = set()  # FR-SITE-006: 1회만 알림
+
+    def _get_domain_lock(self, url: str) -> threading.Lock:
+        domain = urlparse(url).netloc
+        with self._domain_locks_master:
+            if domain not in self._domain_locks:
+                self._domain_locks[domain] = threading.Lock()
+            return self._domain_locks[domain]
+
+    def run_site(self, site_id: str) -> dict:
+        # FR-CRL-007: 이미 진행 중이면 skip
+        # robots.py 검증
+        # crawl_method 별 Crawler 선택 (rss → RssCrawler, html → HtmlCrawler)
+        # detect_new_items
+        # commit + site.status='ok' + last_ok_at=now
+        # 실패 시 _failure_counters[site_id] += 1; ≥5 → site.status='failed' + (옵션) notify owner
+        # 성공 시 _failure_counters.pop(site_id, None); _failure_notified.discard(site_id)
+
+    def run_all(self) -> dict:
+        # site.enabled=True인 모든 사이트 병렬 (도메인 lock 적용)
+        # 결과 dict 반환
+```
+
+- `_notify_owner_failure(site)` — 이번 Step에서는 **로그 출력만** (`logger.error(...)`). 실제 메일/메신저는 Step 4 Notifier에서 통합. BUILD-LOG에 등재.
+- 동시성 정책 (FR-CRL-006): 같은 도메인은 lock으로 직렬, 다른 도메인은 병렬.
+- 진행 중복 방지 (FR-CRL-007): `_in_progress` set으로 site_id 단위.
+
+#### 3.10 main.py 수정 — Watchtower scheduler 통합
+
+기존 `app.scheduler.setup_scheduler` 는 dart/fsc만 다룸. Watchtower는 사이트 30개를 사이트별 interval로 스케줄링하므로 별도 함수 추가:
+
+```python
+# main.py lifespan 내부
+from monitor.watchtower.worker import WatchtowerWorker
+
+watchtower_worker = WatchtowerWorker(SessionLocal)
+app.state.watchtower_worker = watchtower_worker
+
+# 사이트별 cron 스케줄링
+with SessionLocal() as session:
+    sites = session.execute(select(Site).where(Site.enabled == True)).scalars().all()
+    for site in sites:
+        scheduler.add_job(
+            watchtower_worker.run_site,
+            "interval",
+            minutes=site.crawl_interval_min,
+            args=[site.id],
+            id=f"watchtower_{site.id}",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+```
+
+- `legacy import`(events.jsonl → Item) 는 **유지** (Step 2 동작 보존). Step 4 Notifier 도입 후 deprecate 결정.
+- 새로 `POST /api/trigger-watchtower` 엔드포인트 추가:
+  - `{site_id?: str}` body — 단일 사이트 또는 전체 trigger
+  - 202 Accepted 반환, BackgroundTasks 사용
+  - Step 1의 `/trigger`와 별개 endpoint
+
+#### 3.11 테스트 (`tests/test_watchtower_crawler.py` 신규)
+
+- `test_robots_allowed_default` — robots.txt 404 시 fail-open True
+- `test_robots_disallow_path` — 명시적 Disallow 매칭 False
+- `test_rss_crawler_parses_atom` — fixture XML 입력 → CrawledItem N개
+- `test_rss_crawler_handles_bozo` — invalid XML 입력 → error 세팅
+- `test_html_crawler_extracts_with_selector` — fixture HTML + selector → 항목 N개
+- `test_html_crawler_no_match` — selector 매칭 0개 → error
+- `test_html_crawler_timeout` — `httpx.TimeoutException` 발생 → error
+- `test_detector_dedup` — 같은 url 두 번 입력 시 새 Item 1개만
+- `test_detector_creates_uuid_id` — Item.id 자동 32-hex
+- `test_worker_run_site_success` — mocked crawler + DB → site.status='ok'
+- `test_worker_run_site_failure_counter` — 5회 연속 실패 → site.status='failed'
+- `test_worker_in_progress_skip` — 진행 중 동일 site_id 재호출 시 skip
+- `test_worker_domain_lock` — 같은 도메인 사이트 동시 호출 직렬화 확인
+- `test_seed_enabled_field` — yaml의 `enabled: false` 사이트 skip
+- `test_legacy_import_still_works` — Step 2 import 회귀 없음
+- `test_api_items_returns_crawled` — 실제 적재 후 /api/items 응답
+- `test_api_trigger_watchtower_202` — POST 202 + BackgroundTasks
+- `test_item_id_default_uuid` — 명시 세팅 없이 Item() 생성 시 id 자동 부여
+- `test_legacy_import_explicit_id_preserved` — content_hash[:32] 그대로 유지
+
+기존 83 tests + 신규 18 = **101 통과** 목표.
+
+테스트는 외부 네트워크 의존성 회피 — `respx` 또는 `pytest-httpx` 또는 monkeypatch로 httpx mocking. Step 1 패턴 (`unittest.mock`) 재사용 가능.
 
 ### Constraints
 
-- **Step 1 자산 무파괴**: `monitor/`, `app/database.py`(JSONL), `app/scheduler.py`(APScheduler), 기존 라우트 그대로.
-- **단일 사용자 가정** (ASM-005): Phase 1은 환경변수 기반 1명. `users` 테이블 행 1개.
-- **외부 의존 추가 최소화**: `sqlalchemy` 만. `aiosqlite`·`alembic` 보류.
-- **NFR-USE-001 (한국어)**: 모든 UI·에러 메시지 한국어.
-- **NFR-SEC-005 (시크릿)**: 환경변수 (`WATCHTOWER_ADMIN_EMAIL`) 만. 코드 하드코딩 금지.
-- **CON-006 (외부 LLM 금지)**: 자동 요약·분류 코드 일체 금지.
-- **파일 권한 0o600**: `data/watchtower.sqlite` (Windows no-op, Step 1과 동일 정책).
+- **Step 1 자산 무파괴**: `monitor/collectors/`, `monitor/worker.py`, `monitor/notifier.py`, `monitor/matcher.py`, `app/database.py`, `app/scheduler.py` 변경 금지. Step 1 `/events`·`/alerts`·`/trigger`·`/status` 회귀 없음.
+- **Step 2 자산 무파괴**: `app/db/models.py`는 Item.id default + Site.enabled 추가 외 변경 없음. `app/routes/watchtower.py` 의 5개 GET endpoint 응답 contract 유지. legacy import 동작 유지.
+- **외부 LLM 금지** (CON-006).
+- **외부 사이트 접근**: 실제 fetch 시 `User-Agent` 명시 필수 (FR-CRL-005). robots.txt 검증 필수.
+- **Timeout 30초** (FR-CRL-008): httpx 모든 요청에 적용.
+- **신규 의존성 3개만** (httpx, beautifulsoup4, lxml). aiohttp/Playwright/Scrapy 도입 금지.
+- **CHANGE 감지 미구현**: 모든 신규 Item.type='NEW'. CHANGE는 Phase 2.
+- **Snapshot 저장 미구현**: HTML diff용 snapshot 테이블·gzip은 Phase 2.
+- **알림 발송 미구현**: 5회 실패 시 owner 알림은 logger.error 로만. 실 메일/webhook은 Step 4.
 
 ### Success Criteria
 
-- ✅ `pip install -r requirements.txt` 성공
-- ✅ `uvicorn main:app --reload` 정상 부팅 + lifespan 로그에 `[seed]` 8 categories / 30 sites / 1 user 출력
-- ✅ `data/watchtower.sqlite` 생성 + WAL 파일 동반
-- ✅ 브라우저 `http://localhost:8000/ui` → prototype UI 정상 렌더 + 사이드바 8 카테고리 + 사이트 30개 정상 fetch
-- ✅ 카드 피드: events.jsonl import 결과 (없으면 빈 상태)
-- ✅ 별/벨/필터/상세패널 mock 동작 (localStorage)
-- ✅ `pytest tests/` → 기존 67 + 신규 12개 = 79 통과 (또는 그 이상)
-- ✅ `curl http://localhost:8000/status` → Step 1 응답 회귀 없음
-- ✅ `curl http://localhost:8000/api/health` → `{"ok": true, ...}`
+- ✅ `pip install -r requirements.txt` 성공 (httpx + bs4 + lxml 추가)
+- ✅ `pytest tests/` → 83 (기존) + 18+ (신규) = 101+ 통과
+- ✅ `uvicorn main:app --reload` 정상 부팅 + 사이트 30개(또는 enabled=true 만큼) 스케줄링 로그
+- ✅ `curl -X POST http://localhost:8000/api/trigger-watchtower` → 202 응답
+- ✅ 트리거 후 `data/watchtower.sqlite` 의 items 테이블에 신규 row 생성 (적어도 1개 이상)
+- ✅ `curl http://localhost:8000/api/items?limit=200` → 적재된 items 반환
+- ✅ 브라우저 `/ui` → 카드 피드에 실 데이터 표시
+- ✅ Step 1 `/status`, `/events`, `/alerts`, `/trigger` 응답 회귀 없음
+- ✅ `/api/health` 의 `sites_failed` 카운터가 실패한 사이트 수 정확히 반영
+- ✅ 같은 도메인 사이트 2개 동시 트리거 시 직렬화 확인 (테스트로 검증)
+- ✅ Site.enabled=False 사이트는 스케줄링·crawl 양쪽에서 skip
 
 ### Out of Scope (다음 Step)
 
-- ❌ Watchtower 전용 RSS/HTML 크롤러 (Step 3)
-- ❌ NEW Detector 자동 적재 (Step 3)
-- ❌ CHANGE 감지·diff·snapshot (Phase 2)
-- ❌ subscriptions API + 권한 분리 (Step 4)
+- ❌ Subscriptions REST API + 권한 분리 (Step 4)
 - ❌ SMTP 즉시·다이제스트 (Step 4)
-- ❌ alert_log·audit_log 영속 (Step 4·5)
-- ❌ 토큰 인증 / SSO (Step 5)
+- ❌ alert_log 영속 + 5회 실패 시 실 owner 알림 (Step 4)
+- ❌ CHANGE detection / diff snapshot / 30일 보관 (Phase 2)
+- ❌ JS 렌더링 사이트 (Playwright, Phase 2)
+- ❌ 사내 SSO / 토큰 인증 (Step 5)
 - ❌ Docker compose / Harbor (Step 5)
-- ❌ webhook (Phase 2)
+- ❌ 사내 메신저 webhook (Phase 2)
 
 ### Decisions
 
-1. **Sync SQLAlchemy**: FastAPI async 컨텍스트에서 sync session 사용. `Depends(get_session)` 패턴. async DB는 Step 5 검토.
-2. **WAL 모드**: `PRAGMA journal_mode=WAL` 영구 적용 (재연결 시 유지).
-3. **단일 사용자**: `users` 테이블 행 1개. `WATCHTOWER_ADMIN_EMAIL` 매칭으로 me 결정.
-4. **read_by CSV**: JSON 컬럼 대신 CSV 문자열 — SQLite JSON1 의존 회피.
-5. **prototype HTML 무수정**: 가능한 한 인라인 데이터만 fetch로 교체. 디자인·인터랙션은 그대로.
-6. **legacy import 임시**: dart/fsc → s1 매핑은 데모용. Step 3에서 정식 매핑.
-7. **테스트 DB**: `tmp_path / 'test.sqlite'` 사용. 기존 테스트의 JSONL fixture와 충돌 없음.
+1. **Synchronous httpx 사용**: FastAPI async/sync 혼합 회피. WatchtowerWorker는 ThreadPoolExecutor 패턴 (Step 1과 일관).
+2. **robots.txt fail-open**: 폐쇄망 + over-blocking 방지. spec FR-SITE-005 충실히 따르되 robots.txt 자체 fetch 실패는 허용.
+3. **5회 실패 알림은 logger.error만**: Step 4 Notifier 통합 전까지. BUILD-LOG에 known gap 등재.
+4. **Site.enabled 컬럼 신설**: yaml에서 disabled 사이트를 표현. 기존 `status='blocked'` 와 의미 분리 — `enabled=False` 는 운영자가 의도적으로 끔, `status='blocked'` 는 robots.txt에 의해 자동 차단.
+5. **legacy import 보존**: Step 2 동작 그대로. Step 4 이후 deprecate 결정.
+6. **content_hash 입력 = title + url + summary**: HTML 본문 전체가 아니라 메타데이터만. CHANGE 감지(Phase 2)에서는 별도 page_hash 사용 예정.
+7. **별도 endpoint `/api/trigger-watchtower`**: 기존 `/trigger`(Step 1)와 분리. URL 충돌 없고 의도 명확.
 
 ### Flags (추측 금지)
 
-1. **`WATCHTOWER_ADMIN_EMAIL`** — `.env.example` 에 `admin@watchtower.local` 더미 추가. 운영 시 사내 이메일로 교체.
-2. **카테고리/사이트 ID 형식** — prototype과 동일 (`reg`, `s1` 등). UI JS가 이 ID로 매칭하므로 임의 변경 금지.
-3. **Item ID** — `uuid.uuid4().hex` (32자 hex). ULID 미도입.
-4. **사이트 30개 상세 정보** — prototype `SITES` 배열의 `name`·`cat`·`status`만 있음. URL·crawl_method·content_selector·interval은 ideation §부록 A 추정 + 필요 시 Builder가 합리적 기본값으로 채움. **모든 URL은 https로 통일 + 추정값에는 yaml 주석 `# tentative`** 표시.
-5. **/api/items.detected_at 형식** — ISO 8601 UTC (`...Z`). 프론트에서 상대시간 변환.
+1. **사이트 URL 검증 결과 등재 위치**: `handoff/REVIEW-REQUEST.md` 의 Self-Review 섹션 + BUILD-LOG.md 의 "사이트 검증 결과" 표. yaml 주석은 `# verified 2026-05-10` 또는 `# tentative — pending owner review`.
+2. **Builder가 폐쇄망/Proxy 환경에서 작업하는 경우**: 외부 사이트 접근 불가 시, 모든 30개 사이트를 `enabled=false` 로 두고 fixture/mock 기반 테스트로만 검증. BUILD-LOG에 명시. 실 검증은 Owner가 별도 환경에서 수행.
+3. **`max_workers` 기본값 5**: Step 1과 일관. env `WATCHTOWER_MAX_WORKERS` override 가능.
+4. **scheduler에 등록할 site 갯수**: Site.enabled=True 만. 기동 로그에 `Watchtower scheduler: N sites registered (M skipped — disabled)` 명시.
+5. **신규 신규 endpoint 추가 시 OpenAPI doc 자동 등록**: FastAPI 기본 동작. `/docs` 에서 확인 가능.
 
 ### Branch / Worktree
 
-- 현재 worktree: `claude/stoic-meitner-47d182` (이미 active)
-- 작업은 이 브랜치에서 진행 → master로 PR/머지
+- 현재 worktree: `claude/stoic-meitner-47d182`
+- Step 2가 master로 push 완료 (61a4f23). 이번 Step 3 commit은 동일 worktree에 추가 후 master push.
 
 ---
 
 ## How This Works
 
 Builder:
-1. 본 brief 정독 → 불명확한 부분 ARCHITECT-BRIEF.md 끝에 질문 추가
-2. 완전 이해 시 "Brief 확인 완료" 신호
-3. 위 작업 분할(2.1~2.8) 순서대로 구현
-4. `pytest` 전체 통과 확인 후 `handoff/REVIEW-REQUEST.md` 작성
+1. 본 brief 정독 → 불명확한 부분은 본 파일 끝에 "## Builder Questions" 섹션으로 추가
+2. "Brief 확인 완료" 신호
+3. 작업 순서:
+   - 3.1 (escalation 처리: Item.id default, Site.enabled, 사이트 URL 검증)
+   - 3.2 (의존성 추가)
+   - 3.3~3.9 (크롤러 + detector + worker)
+   - 3.10 (main.py scheduler 통합)
+   - 3.11 (테스트)
+4. `pytest tests/ -v` 전체 통과 확인 후 `handoff/REVIEW-REQUEST.md` 작성
+
+---
+
+## Watchtower MVP Roadmap (참고)
+
+| Step | 주제 | 상태 |
+|---|---|---|
+| 2 | DB + Seed + UI Shell | ✅ 2026-05-10 |
+| **3** | **Crawler + Detector + Items 적재 (현재)** | 🚧 |
+| 4 | Subscriptions + Notifier | ⏸️ 대기 |
+| 5 | Audit + Auth + Deploy | ⏸️ 대기 |
 
 ---
 
