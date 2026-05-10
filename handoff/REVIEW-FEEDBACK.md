@@ -1,71 +1,13 @@
-# Review Feedback — Step 1 (Re-review)
-Date: 2026-05-09
+# Review Feedback — Step 2
+Date: 2026-05-10
 Status: APPROVED
 
-## Re-review Summary
+## Conditions
+(none)
 
-All 17 Conditions and all 4 Architect decisions are properly applied at the
-code level — verified against the actual source, not Builder's claims. Test
-suite goes from 37 → 67 (`pytest tests/ -v` reports 67 passed in ~1s). The
-`pytest.ini` filter is correctly scoped to a third-party feedparser
-DeprecationWarning only; no warnings originate from project code. The Pydantic
-V2 migration is complete: `model_config` / `ConfigDict` / `json_encoders` are
-fully removed from `app/models.py`, replaced by `@field_serializer` on the
-three datetime-bearing models. No drift, no regression, no new findings.
-
-## Conditions Verified (17/17)
-
-- C1 — PASS — `monitor/collectors/rss.py:43-106` — 3-attempt retry loop with `[1, 2, 4]` backoff, body fetched via `httpx.Client(timeout=self.timeout_seconds)`, then handed to `feedparser.parse(body)`.
-- C2 — PASS — `monitor/notifier.py:38-39, 99-159, 201` — `SMTP_TIMEOUT_SECONDS=10`, `EMAIL_RETRY_BACKOFFS=(1,2,4)`, 3-attempt loop with `time.sleep(backoff)` between attempts, `failed` AlertLog written only after exhaustion.
-- C3 — PASS — `app/models.py:43` (`is_duplicate: bool = False`) + `monitor/worker.py:167-178, 196-199` — duplicate path appends `dup_event` with `is_duplicate=True` via `append_jsonl` and skips notify; "Duplicate detected" log line present.
-- C4 — PASS — `app/database.py:140-187` — `validate_jsonl_file(filepath) -> int` rewrites file in place via `.tmp` + `os.replace`, logs dropped line numbers. Called from `main.py:60-64` for both `events.jsonl` and `alerts.jsonl` during lifespan startup.
-- C5 — PASS — `app/routes/status.py:150-152, 172-174` — `Query(default=100, ge=1, le=1000)` for `limit` on both `/events` and `/alerts`; `source` (events), `severity` (alerts), and `days` query params present and filtered.
-- C6 — PASS — `app/routes/status.py:204-230` — `@router.post("/trigger", status_code=202)`, `BackgroundTasks` injected, `_trigger_run` fired via `background_tasks.add_task`, body returns `{job_id, source, status: "queued", message}`.
-- C7 — PASS — `app/routes/status.py:117-130` — returns `uptime_seconds`, `failed_alert_count`, per-source `{status, event_count, alert_count, error_count}`, plus `memory_mb`/`cpu_percent` (psutil; primed once at import time).
-- C8 — PASS — `config/keywords.yaml` — urgent: 19 entries (≥14 spec'd), watch: 13 entries (≥9), info: 7 entries (≥4). All spec keywords present (폐지/청산/부도/상장폐지/거래정지/분할/합병/영업양수도/자산양도/워크아웃/기업개선약관/부채재조정 in urgent; 유상증자/무상증자/증자/신주발행/상호변경/본점이전/사업목적변경 in watch; 보도자료/뉴스 in info).
-- C9 — PASS — `config/sources.yaml` — keys are `url`, `poll_interval_seconds`, `timeout_seconds`, `retry_attempts`. DART URL is `https://dart.fss.or.kr/api/todayRSS.xml` per Architect Esc-1.
-- C10 — PASS — `monitor/notifier.py:201-211, 121-137, 240-245` — STARTTLS exception caught inside `_send_one_attempt`, raised as `_StarttlsFailedError`. Caller branch in `_send_email` returns `failed` AlertLog with `error_message="STARTTLS failed"` and never reaches `smtp.login`. Confirmed by `test_starttls_failure_does_not_login_plaintext` (`smtp.login.assert_not_called()`).
-- C11 — PASS — `monitor/notifier.py:139-144, 24-32` — `logger.warning("Email send failed for %s: %s", event.external_id, type(exc).__name__)`. AlertLog `error_message` runs through `_redact_password_substrings()` which substitutes `password=...` → `password=[REDACTED]` (helper test verifies the regex).
-- C12 — PASS — `app/database.py:37-43, 67-68, 98-99, 175, 199` — `_ensure_owner_only_perms` swallows `OSError`/`NotImplementedError` (Windows no-op) and is invoked on first creation of `events.jsonl`, `alerts.jsonl`, and `state.json`, plus after `validate_jsonl_file` rewrites.
-- C13 — PASS — `monitor/worker.py:31-37, 142-158` — `_resolve_thread_pool_size()` reads `THREAD_POOL_SIZE` env (default 5, hard cap 32), used as `max_workers` for `ThreadPoolExecutor` running `c.collect`. Per-collector exceptions handled in `as_completed` loop without aborting siblings.
-- C14 — PASS — `app/database.py:222-224` — `event_exists(content_hash, cache)` — `filepath` parameter removed. Tests in `tests/test_database.py:test_event_exists_with_cache` and `tests/test_dedup.py:test_event_exists_with_cache_set` updated to the new signature.
-- C15 — PASS — `app/database.py:75-104` — `append_if_new(filepath, data, cache, content_hash)` performs the hash check inside the same `with lock:` as the file append and only mutates `cache` after a successful write. `monitor/worker.py:188-199` uses it; on race-loss (`inserted is False`) writes the duplicate row with `is_duplicate=True`.
-- C16 — PASS — `app/models.py:42` (`matched_keywords: list[str] = Field(default_factory=list)`) + `monitor/worker.py:172, 183` (`matched_keywords: matched`, no `or None` coercion). Verified by `test_matched_keywords_always_list_even_when_empty`.
-- C17 — PASS — `app/scheduler.py:26-30` — `cfg.get("poll_interval_seconds")` is read first, `poll_interval_sec` is only a backward-compat fallback; `sources.yaml` uses the canonical key.
-
-## Architect Decisions Verified (4/4)
-
-- Esc-1 (DART URL → todayRSS.xml) — PASS — `config/sources.yaml:5` uses `https://dart.fss.or.kr/api/todayRSS.xml`.
-- Esc-2 (DART substring match + startup warning) — PASS — `monitor/collectors/dart.py:14-25, 50-51` — `_warn_substring_match_once()` logs once per process when a watchlist is configured. Substring matching retained (line 68: `any(code in haystack for code in self.watchlist)`).
-- Esc-3 (Pydantic `@field_serializer` migration) — PASS — `app/models.py` has `@field_serializer` on `ExternalEvent.published_at`/`fetched_at`, `AlertLog.sent_at`, and `SystemState.last_poll`. `model_config`, `ConfigDict`, and `json_encoders` are not present in `app/`. `pytest tests/` reports 0 Pydantic deprecation warnings.
-- Esc-4 (KeywordRule.exclude_keywords retained with comment) — PASS — `app/models.py:93-99` — field kept with comment "Step 2 scaffolding: matcher uses this in Step 2 for fuzzy/exclusion matching."
-
-## New Test Files Verified (T1–T4)
-
-- T1 `tests/test_notifier.py` — 9 tests covering STARTTLS fail-closed (login.assert_not_called), 3-attempt retry, 10s timeout assertion, password redaction (helper + integration), missing-config graceful skip, urgent/info routing, and final failed-AlertLog persistence.
-- T2 `tests/test_worker.py` — 4 tests covering duplicate-write-with-flag (rows length 2, second `is_duplicate=True`, single notify), collector failure isolation across ThreadPoolExecutor, `matched_keywords=[]` when no match, and severity escalation when matched.
-- T3 `tests/test_routes.py` — 11 tests covering 422 on out-of-range limits, source/severity filters, /trigger 202 + job_id + BackgroundTask invocation, /status spec shape (uptime_seconds, failed_alert_count, memory_mb, cpu_percent, per-source counts), and ok/error transitions.
-- T4 `tests/test_rss.py` (extended +5) — 3-attempt-then-empty path with `sleep_calls == [1, 2]`, retry-then-succeed (2 calls), parametrized real-feedparser end-to-end on DART RSS 2.0 and FSC RSS 2.0 fixtures (verifies FeedParserDict + struct_time handling), and full pipeline via mocked httpx → real feedparser → ExternalEvent.
-
-## Test Run
-
-```
-67 passed in 0.99s
-```
-
-- `configfile: pytest.ini` (filter scoped narrowly to feedparser's own DeprecationWarning).
-- 0 warnings from project code.
-- 0 failures.
-
-## New Findings
-
-None. No drift, no regressions, no missed edge cases. Builder's mapping in `## Re-submission` matches the code on disk.
+## Escalate to Architect
+- 30개 사이트 URL/selector 다수가 `# tentative` 추정값입니다 (s2~s12, s15~s16, s18~s30 등). 본 Step 2 브리프는 정확도 검증을 Step 3 (Crawler+Detector)로 명시 위임했고 Builder는 그 가이드대로 https + tentative 주석을 달았습니다. 다만 Step 3 진입 전에 Project Owner 측 검토(특히 reg/comp/sec 카테고리 — 컴플라이언스·정보보안 부서가 직접 사용)가 필요한지는 코드 레벨 결정 사항이 아니므로 Architect/Owner가 판단 부탁드립니다.
+- `Item.id` 모델 기본값 미설정 — Brief Flag §3은 `uuid.uuid4().hex`를 명시했지만 `app/db/models.py:110` 의 `id` 컬럼에 `default=` 콜백이 없습니다. Builder의 Deviation §2(legacy import idempotency)는 정당하지만, Step 3 크롤러가 Item을 만들 때 매번 `id=uuid.uuid4().hex`를 명시 세팅해야 한다는 사실이 **코드 자체에 강제되지 않습니다**. Step 3 ARCHITECT-BRIEF에 명시 또는 BUILD-LOG의 Known Gaps 등재 여부를 결정 부탁드립니다 — 코드 레벨에서 `default=lambda: uuid.uuid4().hex`를 추가하는 것은 legacy import의 명시적 id 세팅과 충돌 없이 공존 가능하므로 단순 작업이지만, 현 Step 2 스코프 밖이라 Condition으로 잡지 않았습니다.
 
 ## Cleared
-
-All 17 Conditions and all 4 Architect decisions are confirmed in code; the
-new `tests/test_notifier.py`, `tests/test_worker.py`, `tests/test_routes.py`,
-and the T4 additions in `tests/test_rss.py` cover the previously-untested
-high-risk modules (notifier STARTTLS/retry/redaction, worker duplicate write
-+ collector isolation, route Query validation/filters/202 contract, real
-feedparser parsing). Step 1 ships.
+83개 테스트(67 기존 + 16 신규) 전수 통과를 직접 재확인했고(`pytest tests/ -v` → 83 passed in 2.82s), Step 2 신규 11개 파일(`app/db/__init__.py`·`session.py`·`models.py`·`seed.py`·`import_legacy.py`, `app/routes/watchtower.py`, `config/seed_categories.yaml`·`seed_sites.yaml`·`seed_users.yaml`, `static/watchtower.html`, `tests/test_watchtower.py`)과 수정 4개 파일(`main.py`·`requirements.txt`·`tests/conftest.py`·`.env.example`) 전체를 정독했습니다. 보안 표면(escapeHtml 커버리지·`https?://` URL 화이트리스트로 javascript: 스킴 차단·SQLAlchemy ORM 파라미터 바인딩으로 SQL injection 차단·env 치환 정규식의 좁은 surface·legacy JSONL 방어 코드·`target="_blank" rel="noopener noreferrer"` 적용)·spec compliance(브리프 §2.1~§2.8 + Constraints + Flags §1~§5 모두 매핑)·Korean UX 메시지(NFR-USE-001 — `등록된 사용자가 없습니다`/`데이터를 불러오지 못했습니다`/`표시할 업데이트가 없습니다` 등)·NFR-SEC-005(코드 내 실제 도메인 이메일 없음, `${WATCHTOWER_ADMIN_EMAIL}` env-only)·CON-006(LLM 호출 코드 0건)·Step 1 자산 무파괴(`monitor/`·`app/database.py`·`app/scheduler.py`·`app/routes/status.py` `git diff` 비어있음)를 모두 확인했고 블로킹 결함을 찾지 못했습니다. Builder의 5개 Deviations은 모두 정당하며, 특히 `read_by` CSV 부분문자열 오탐(`u1`이 `u10`의 prefix) 회피를 위한 Python 후처리 결정과 legacy import의 `content_hash[:32]` 기반 idempotency 결정은 합리적입니다. 머지 가능합니다.

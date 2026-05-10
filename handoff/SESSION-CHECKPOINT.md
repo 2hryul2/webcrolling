@@ -62,70 +62,99 @@ If the checkpoint is recent and complete, skip all other files.
 
 # Session Checkpoint
 
-Date: 2026-05-09
+Date: 2026-05-10
 Architect: Senior Technical Lead
-Status: IDLE (Step 1 deployed)
+Status: IDLE (Step 2 deployed)
 
 ## What's Done
 
-- 프로젝트 초기화 — ✅ 2026-05-09
-- Step 1: FastAPI 프로젝트 초기화 + RSS 수집 기본 구조 — ✅ deployed 2026-05-09
-  - 17개 모듈 (`app/`, `monitor/`, `main.py`, `config/`)
-  - 7개 테스트 파일 / 67 tests passing / 0 deprecation warnings
-  - Reviewer APPROVED (17 Conditions 모두 해결, 4 escalations 적용)
-  - 한국어 데이터 무결성 검증 완료 (UTF-8, codepoint 일치)
+- Step 1: FastAPI + RSS 수집 — ✅ deployed 2026-05-09
+- **Step 2: Watchtower Foundation (DB + Seed + UI Shell) — ✅ deployed 2026-05-10**
+  - 신규 11 파일 + 수정 5 파일
+  - SQLAlchemy 2.0 + SQLite WAL — 4 도메인 모델 (User/Category/Site/Item)
+  - yaml seed 멱등 적재 (8 카테고리 / 30 사이트 / 1 사용자)
+  - 5 GET API: `/api/categories|sites|items|users/me|health`
+  - `static/watchtower.html` (prototype 디자인 보존, 인라인 데이터 → fetch)
+  - events.jsonl → Item 임시 import 브리지
+  - 83 tests passing (기존 67 + 신규 16, 0 skipped)
+  - Reviewer APPROVED, Conditions 0건
 
 ## What's Next
 
-다음 세션 시작 시:
-1. **평일 영업시간에 DART RSS 실제 수집 결과 검증** (entries > 0 확인)
-2. **FSC RSS endpoint 재조사** (현재 HTML 반환) — 실제 endpoint URL 발굴 또는 폐지 처리
-3. **Step 2 사양 확정 후 ARCHITECT-BRIEF.md 작성:**
-   - DART OpenAPI 보강 수집기 (corp_code 정확 매칭)
-   - 국회 열린국회정보 API 수집기
-   - YouTube 채널 RSS 수집기
-   - 키워드 사전 고도화 (`exclude_keywords` 활용 + fuzzy matching)
-4. Step 1 운영 중 이슈/오탐 수집 (Project Owner 피드백)
+다음 세션 시작 시 → **Step 3: Crawler + Detector + Items 적재**
+
+1. **Step 2 escalation 처리** (Step 3 첫 작업):
+   - 30 사이트 URL/selector tentative 검토 — Owner 컨펌 후 실 URL/HTML 구조 확인 (특히 reg/comp/sec)
+   - `app/db/models.py` Item.id 에 `default=lambda: uuid.uuid4().hex` 추가
+2. **Watchtower 전용 RSS/HTML 크롤러 작성** (FR-CRL-001~008, FR-DET-001/002)
+   - feedparser RSS path
+   - httpx + BS4 HTML path
+   - 사이트별 `crawl_interval_min` 강제 (60분 minimum)
+   - 도메인당 동시 1 요청 제한
+3. **NEW Detector + Items 적재** — content_hash (SHA-256) 기반 dedup
+4. **APScheduler Watchtower 통합** — 사이트별 interval로 스케줄링
+5. **legacy import 단계 deprecate** — Step 3 크롤러로 전환
 
 ## Current Brief
 
-(없음 — Step 1 종료. Step 2 시작 시 새로 작성)
-
-이전 Step 1 brief: `handoff/ARCHITECT-BRIEF.md` (보존됨, 참고용)
+(Step 2 brief는 `handoff/ARCHITECT-BRIEF.md`에 보존. Step 3 시작 시 새로 작성)
 
 ## Key Context
 
-- **기술 스택**: FastAPI 0.115 + APScheduler 3.11 + feedparser 6.0 + Pydantic 2.11 + pytest 9.0 / Python 3.13
-- **데이터 저장**: 파일 기반 JSONL (`data/events.jsonl`, `data/alerts.jsonl`, `data/state.json`) — DB 없음
-- **알람**: SMTP 이메일(urgent/watch만) + 파일 로깅(전체) — 동시 발송, graceful skip
-- **파일 권한**: 0o600 (Windows에서는 no-op)
-- **동시성**: ThreadPoolExecutor (`THREAD_POOL_SIZE` env, default 5, max 32)
-- **재시도 정책**: RSS fetch 3회 + SMTP 3회 (1/2/4s 지수 백오프)
-- **Worker 흐름**: 수집 → 정규화 → dedup(`is_duplicate=true`로 중복도 기록) → 키워드 매칭 → 알람
-- **주요 파일**:
-  - 진입점: `main.py` (FastAPI lifespan)
-  - 워커: `monitor/worker.py`
-  - DB I/O: `app/database.py` (atomic `append_if_new`)
-  - 매처: `monitor/matcher.py` (pre-compiled regex)
-  - 알람: `monitor/notifier.py` (STARTTLS fail-closed, credential redaction)
-  - 라우트: `app/routes/status.py` (`/status`, `/events`, `/alerts`, `/trigger 202`)
+### Step 2 추가 사항
+- **DB**: SQLite WAL (`data/watchtower.sqlite`), SQLAlchemy 2.0 sync, `Base.metadata.create_all` (Alembic Step 5)
+- **모델**: User/Category/Site/Item (subscriptions·alerts·snapshot·audit는 Step 4·5에서)
+- **read 추적**: `Item.read_by` CSV 문자열 (JSON1 회피)
+- **`/api/items` 정렬**: SQL ORDER BY detected_at DESC + Python read_by 후처리
+- **단일 사용자**: `WATCHTOWER_ADMIN_EMAIL` 환경변수, fallback `admin@watchtower.local`
+- **legacy import**: `events.jsonl` → Item.id = `content_hash[:32]` 로 idempotent
 
-- **Spec 문서**: `@spec_20260509.md` (EARS 형식, 12 FR + 10 NFR)
-- **Ideation**: `ideation/ideation_step1_webcrawl_20260509.md` (5개 컴포넌트 분석)
-- **개발노트**: `docs/개발노트_step1_20260509.md` (working journal)
+### Step 1 자산 (보존됨)
+- `monitor/`, `app/database.py` (JSONL), `app/scheduler.py`, `app/routes/status.py` 변경 없음
+- `/`, `/status`, `/events`, `/alerts`, `/trigger` 기존 엔드포인트 그대로
+
+### 핵심 문서
+- `ideation/ideation_subscribe-watch_20260510_1029.md` (Watchtower ideation)
+- `spec_20260510_1029.md` (EARS spec, FR-CAT~FR-NOTIF + NFR)
+- `ideation/watchtower-prototype.html` (UI 원본, `static/watchtower.html` 로 이식)
 
 ## Known Gaps (자세히는 BUILD-LOG.md 참조)
 
-- FSC endpoint HTML 반환 (Step 2에서 수정)
-- DART RSS 평일 영업시간 재검증 필요
-- 로깅 stderr only (파일 핸들러 미추가)
+### Step 3 진입 전 처리
+- 30 사이트 URL/selector tentative — Owner 검토 + 실 검증 필요
+- `Item.id` default 미설정 — Step 3에서 `default=` 추가
+
+### Step 1 잔여 (Step 3에서 통합 처리)
+- FSC RSS endpoint HTML 반환 — Watchtower 크롤러 작성 시 함께 재조사
+- DART RSS 평일 영업시간 재검증
+- 로깅 stderr only (파일 핸들러 Step 5)
+
+### 다음 Step에서 자연 해결
+- Watchtower 크롤러 부재 (Step 3) / CHANGE detection (Phase 2) / Subscriptions API (Step 4) / SMTP 알림 (Step 4) / 토큰 인증·Docker (Step 5)
+
+## Watchtower MVP Roadmap
+
+| Step | 주제 | Spec FR | 예상 |
+|---|---|---|---|
+| 2 ✅ | DB + Seed + UI Shell | FR-CAT-001/002, FR-SITE-001/003, FR-USR-001, FR-FEED-001/002/004/005 | 완료 |
+| 3 | Crawler + Detector + Items | FR-CRL-001~008, FR-DET-001/002, FR-SITE-005/006 | 2일 |
+| 4 | Subscriptions + Notifier | FR-SUB-001~005, FR-NOTIF-001~008 | 2일 |
+| 5 | Audit + Auth + Deploy | FR-AUDIT-001~003, FR-USR-002~004, NFR-COMP-002 | 2일 |
+
+## Spec 보완 작업 (Step 2 완료 후 별도 사이클)
+
+`spec_20260510_1029.md` v0.2 작성 (B1~B4):
+- B1: Phase 1/2/3 매핑 표 추가
+- B2: OpenAPI sketch (Step 2 API 응답 형식 등재)
+- B3: 8 카테고리 + 30 사이트 seed 부록 등재
+- B4: FR-NOTIF-007 우선순위 명시
 
 ## Git State
 
-- Branch: master
+- Branch: claude/stoic-meitner-47d182 (worktree) → master push 완료
 - Remote: `https://github.com/2hryul2/webcrolling.git`
-- Last commit: Step 1 메타 파일 + checkpoint (2026-05-09)
-- Uncommitted files: none (이 커밋 후 깨끗함)
+- Last commit: `[Step 2] Watchtower Foundation: DB + Seed + UI Shell`
+- Uncommitted files: (push 완료 후 깨끗)
 
 ## Resume Prompt (다음 세션 시작 시 사용)
 

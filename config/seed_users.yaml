@@ -1,0 +1,8 @@
+# Watchtower seed — 단일 사용자 (Phase 1, ASM-005)
+# email은 환경변수 WATCHTOWER_ADMIN_EMAIL 로 치환되며 미설정 시 기본값 사용.
+users:
+  - id: u1
+    name: "운영자"
+    dept: "AX팀"
+    email: "${WATCHTOWER_ADMIN_EMAIL:-admin@watchtower.local}"
+    role: operator

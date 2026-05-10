@@ -1,0 +1,26 @@
+# Watchtower seed — 카테고리 8개 (prototype CATEGORIES와 동일 ID·순서)
+categories:
+  - id: reg
+    name: "금융 규제·감독"
+    owner_dept: "컴플라이언스"
+  - id: gov
+    name: "정부·정책"
+    owner_dept: "전략기획"
+  - id: comp
+    name: "경쟁사 동향"
+    owner_dept: "AX팀"
+  - id: fin
+    name: "핀테크·빅테크"
+    owner_dept: "디지털전략"
+  - id: ai
+    name: "AI·기술 동향"
+    owner_dept: "AX팀"
+  - id: sec
+    name: "보안·인프라"
+    owner_dept: "정보보안"
+  - id: mkt
+    name: "산업·시장"
+    owner_dept: "리서치"
+  - id: res
+    name: "학회·연구"
+    owner_dept: "리서치"

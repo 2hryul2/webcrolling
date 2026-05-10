@@ -1,0 +1,233 @@
+# Watchtower seed — 30개 사이트 (prototype SITES 배열과 동일 ID·이름·카테고리)
+#
+# 출처: ideation §부록 A. URL/crawl_method/content_selector/crawl_interval_min
+# 일부는 합리적 추정값이며 `# tentative` 주석으로 표시. 실제 URL/셀렉터 검증은
+# Step 3 (크롤러+Detector)에서 수행.
+#
+# 모든 URL은 https 통일. crawl_interval_min은 60 이상 (FR-SITE-003).
+sites:
+  # --- reg: 금융 규제·감독 -------------------------------------------------
+  - id: s1
+    name: "금융위원회"
+    url: "https://www.fsc.go.kr/no010101"
+    category_id: reg
+    crawl_method: html
+    content_selector: "#content .board-list"  # tentative
+    crawl_interval_min: 120
+  - id: s2
+    name: "금융감독원"
+    url: "https://www.fss.or.kr/fss/bbs/B0000188/list.do?menuNo=200218"  # tentative
+    category_id: reg
+    crawl_method: html
+    content_selector: ".board-list tbody tr"  # tentative
+    crawl_interval_min: 120
+  - id: s3
+    name: "한국은행"
+    url: "https://www.bok.or.kr/portal/bbs/B0000338/list.do?menuNo=200761"  # tentative
+    category_id: reg
+    crawl_method: html
+    content_selector: ".bbs-list tbody tr"  # tentative
+    crawl_interval_min: 240
+  - id: s4
+    name: "FATF"
+    url: "https://www.fatf-gafi.org/en/publications.html"  # tentative
+    category_id: reg
+    crawl_method: html
+    content_selector: ".publication-list .item"  # tentative
+    crawl_interval_min: 720
+
+  # --- gov: 정부·정책 ------------------------------------------------------
+  - id: s5
+    name: "기획재정부"
+    url: "https://www.moef.go.kr/nw/nes/nesdta.do?menuNo=4010100"  # tentative
+    category_id: gov
+    crawl_method: html
+    content_selector: ".board-list tbody tr"  # tentative
+    crawl_interval_min: 240
+  - id: s6
+    name: "과학기술정보통신부"
+    url: "https://www.msit.go.kr/bbs/list.do?sCode=user&mPid=112&mId=113"  # tentative
+    category_id: gov
+    crawl_method: html
+    content_selector: ".board-list tbody tr"  # tentative
+    crawl_interval_min: 240
+  - id: s7
+    name: "디지털플랫폼정부"
+    url: "https://www.dpg.go.kr/contents/list.do?menuNo=11000003"  # tentative
+    category_id: gov
+    crawl_method: html
+    content_selector: ".board-list tbody tr"  # tentative
+    crawl_interval_min: 360
+  - id: s8
+    name: "개인정보보호위원회"
+    url: "https://www.pipc.go.kr/np/cop/bbs/selectBoardList.do?bbsId=BS074"  # tentative
+    category_id: gov
+    crawl_method: html
+    content_selector: ".board-list tbody tr"  # tentative
+    crawl_interval_min: 240
+
+  # --- comp: 경쟁사 동향 ---------------------------------------------------
+  - id: s9
+    name: "KB국민은행 보도"
+    url: "https://www.kbstar.com/quics?page=C047075"  # tentative
+    category_id: comp
+    crawl_method: html
+    content_selector: ".press-list li"  # tentative
+    crawl_interval_min: 240
+  - id: s10
+    name: "하나은행 디지털"
+    url: "https://www.kebhana.com/cont/news/news_press/index.jsp"  # tentative
+    category_id: comp
+    crawl_method: html
+    content_selector: ".board-list tbody tr"  # tentative
+    crawl_interval_min: 240
+  - id: s11
+    name: "우리은행 뉴스룸"
+    url: "https://www.wooribank.com/pot/Dream?withyou=PRA0001"  # tentative
+    category_id: comp
+    crawl_method: html
+    content_selector: ".news-list li"  # tentative
+    crawl_interval_min: 240
+  - id: s12
+    name: "NH농협 디지털혁신"
+    url: "https://www.nonghyup.com/Cyberpr/PressRelease/PressReleaseList.aspx"  # tentative
+    category_id: comp
+    crawl_method: html
+    content_selector: ".board-list tbody tr"  # tentative
+    crawl_interval_min: 240
+
+  # --- fin: 핀테크·빅테크 --------------------------------------------------
+  - id: s13
+    name: "카카오뱅크"
+    url: "https://www.kakaobank.com/news/notice"  # tentative
+    category_id: fin
+    crawl_method: html
+    content_selector: ".notice-list li"  # tentative
+    crawl_interval_min: 180
+  - id: s14
+    name: "토스 블로그"
+    url: "https://blog.toss.im/"
+    category_id: fin
+    crawl_method: rss
+    content_selector: null
+    crawl_interval_min: 180
+  - id: s15
+    name: "네이버페이"
+    url: "https://campaign.naver.com/npay/notice/list"  # tentative
+    category_id: fin
+    crawl_method: html
+    content_selector: ".notice-list li"  # tentative
+    crawl_interval_min: 240
+  - id: s16
+    name: "케이뱅크"
+    url: "https://www.kbanknow.com/ib20/mnu/BHP05000000"  # tentative
+    category_id: fin
+    crawl_method: html
+    content_selector: ".board-list tbody tr"  # tentative
+    crawl_interval_min: 240
+
+  # --- ai: AI·기술 동향 ----------------------------------------------------
+  - id: s17
+    name: "Anthropic News"
+    url: "https://www.anthropic.com/news"
+    category_id: ai
+    crawl_method: html
+    content_selector: "main article"
+    crawl_interval_min: 240
+  - id: s18
+    name: "OpenAI Blog"
+    url: "https://openai.com/blog/"
+    category_id: ai
+    crawl_method: html
+    content_selector: "main article"  # tentative
+    crawl_interval_min: 240
+  - id: s19
+    name: "Microsoft Foundry"
+    url: "https://azure.microsoft.com/en-us/blog/product/azure-ai-foundry/"  # tentative
+    category_id: ai
+    crawl_method: html
+    content_selector: "main article"  # tentative
+    crawl_interval_min: 360
+  - id: s20
+    name: "NVIDIA Developer"
+    url: "https://developer.nvidia.com/blog/feed/"
+    category_id: ai
+    crawl_method: rss
+    content_selector: null
+    crawl_interval_min: 240
+
+  # --- sec: 보안·인프라 ----------------------------------------------------
+  - id: s21
+    name: "KISA"
+    url: "https://www.kisa.or.kr/2060201"  # tentative
+    category_id: sec
+    crawl_method: html
+    content_selector: ".board-list tbody tr"  # tentative
+    crawl_interval_min: 240
+  - id: s22
+    name: "보안뉴스"
+    url: "https://www.boannews.com/media/news_rss.xml"  # tentative
+    category_id: sec
+    crawl_method: rss
+    content_selector: null
+    crawl_interval_min: 120
+  - id: s23
+    name: "KrCERT/CC"
+    url: "https://www.krcert.or.kr/data/secNoticeList.do"  # tentative
+    category_id: sec
+    crawl_method: html
+    content_selector: ".board-list tbody tr"  # tentative
+    crawl_interval_min: 180
+  - id: s24
+    name: "KISIA"
+    url: "https://www.kisia.or.kr/news/notice/"  # tentative
+    category_id: sec
+    crawl_method: html
+    content_selector: ".notice-list tbody tr"  # tentative
+    crawl_interval_min: 360
+
+  # --- mkt: 산업·시장 ------------------------------------------------------
+  - id: s25
+    name: "한국경제 핀테크"
+    url: "https://www.hankyung.com/feed/finance"  # tentative
+    category_id: mkt
+    crawl_method: rss
+    content_selector: null
+    crawl_interval_min: 180
+  - id: s26
+    name: "매일경제 금융"
+    url: "https://www.mk.co.kr/rss/50300008/"  # tentative
+    category_id: mkt
+    crawl_method: rss
+    content_selector: null
+    crawl_interval_min: 180
+  - id: s27
+    name: "전자신문 IT"
+    url: "https://rss.etnews.com/Section902.xml"  # tentative
+    category_id: mkt
+    crawl_method: rss
+    content_selector: null
+    crawl_interval_min: 180
+
+  # --- res: 학회·연구 ------------------------------------------------------
+  - id: s28
+    name: "자본시장연구원"
+    url: "https://www.kcmi.re.kr/publications/pub_other_list"  # tentative
+    category_id: res
+    crawl_method: html
+    content_selector: ".publication-list li"  # tentative
+    crawl_interval_min: 720
+  - id: s29
+    name: "한국금융연구원(KIF)"
+    url: "https://www.kif.re.kr/kif4/publication/viewer_pubreport"  # tentative
+    category_id: res
+    crawl_method: html
+    content_selector: ".board-list tbody tr"  # tentative
+    crawl_interval_min: 720
+  - id: s30
+    name: "KISDI"
+    url: "https://www.kisdi.re.kr/report/list.do?cmsCd=CM0027"  # tentative
+    category_id: res
+    crawl_method: html
+    content_selector: ".board-list tbody tr"  # tentative
+    crawl_interval_min: 720
