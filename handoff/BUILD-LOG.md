@@ -6,12 +6,12 @@ Progress record for claude_webcroll project.
 
 ## Current Status
 
-Step 3: ✅ **DEPLOYED** (2026-05-10) — Watchtower Crawler + Detector + Items 적재.
-Reviewer APPROVED (Conditions 0, 3 architect escalations 처리), Project Owner 승인 후 master push.
+Step 4: ✅ **DEPLOYED** (2026-05-10) — Watchtower Subscriptions + Notifier + UI 영속.
+Reviewer APPROVED (Conditions 0, Escalations 0), Project Owner 승인 후 master push.
 
-테스트: 104 passed (83 baseline + 21 new), 0 skipped.
-부팅 검증: `Watchtower scheduler: 15 sites registered (15 skipped — disabled)`.
-1회 트리거: 9 사이트 성공 + 239 items 적재.
+테스트: 130 passed (104 baseline + 26 new), 0 skipped.
+부팅 검증: `Watchtower scheduler: 15 sites registered` + `Digest scheduled: 09:00 KST daily`.
+Smoke: 8 default subs → PATCH reg=instant → 영속 → trigger-watchtower 202 → AlertLog 적재.
 
 **Last Updated:** 2026-05-10
 
@@ -25,6 +25,7 @@ Reviewer APPROVED (Conditions 0, 3 architect escalations 처리), Project Owner 
 | 1 | FastAPI 프로젝트 초기화 + RSS 수집 기본 구조 | 2026-05-09 | ✅ Deployed |
 | 2 | Watchtower Foundation: DB + Seed + UI Shell | 2026-05-10 | ✅ Deployed |
 | 3 | Watchtower Crawler + Detector + Items 적재 | 2026-05-10 | ✅ Deployed |
+| 4 | Watchtower Subscriptions + Notifier + UI 영속 | 2026-05-10 | ✅ Deployed |
 
 ---
 
@@ -102,7 +103,7 @@ Owner 검토 필요: enabled=false 사이트 15개. 사내망 전용 URL/대안 
 |---|---|---|
 | 2 | ✅ DEPLOYED | DB + Seed + UI Shell |
 | 3 | ✅ DEPLOYED | Crawler + Detector + Items 적재 |
-| 4 | ⏸️ 대기 | Subscriptions + Notifier (이메일 즉시/다이제스트, 5회 실패 알림) |
+| 4 | ✅ DEPLOYED | Subscriptions + Notifier (즉시/다이제스트/owner 실패 메일) + UI 영속 |
 | 5 | ⏸️ 대기 | Audit + Auth + Deploy |
 
 ---

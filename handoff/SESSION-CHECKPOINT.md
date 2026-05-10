@@ -64,43 +64,59 @@ If the checkpoint is recent and complete, skip all other files.
 
 Date: 2026-05-10
 Architect: Senior Technical Lead
-Status: IDLE (Step 3 deployed)
+Status: IDLE (Step 4 deployed)
 
 ## What's Done
 
 - Step 1: FastAPI + RSS 수집 — ✅ deployed 2026-05-09
 - Step 2: Watchtower Foundation (DB + Seed + UI Shell) — ✅ deployed 2026-05-10
-- **Step 3: Watchtower Crawler + Detector + Items 적재 — ✅ deployed 2026-05-10**
-  - 신규 패키지 `monitor/watchtower/` (base/robots/rss/html/detector/worker 6 모듈)
-  - `scripts/verify_seed_urls.py` (사이트 URL 검증 utility, 정식 home 승격)
-  - `tests/test_watchtower_crawler.py` (21 hermetic 테스트)
-  - `app/db/models.py`: Item.id `default=lambda: uuid.uuid4().hex`, Site.enabled boolean 컬럼
-  - `config/seed_sites.yaml`: 14 verified / 1 URL 보정(s14 토스 RSS) / 15 enabled=false
-  - `main.py`: WatchtowerWorker lifespan + enabled 사이트 사이트별 APScheduler interval + `POST /api/trigger-watchtower` 202
-  - `requirements.txt`: httpx + beautifulsoup4 + lxml 추가
-  - 104 tests passing (83 baseline + 21 new), 0 skipped
-  - Reviewer APPROVED, Conditions 0건 (3 escalations 처리)
-  - 1회 트리거 검증: 9 사이트 성공 + 239 items 적재
+- Step 3: Watchtower Crawler + Detector + Items 적재 — ✅ deployed 2026-05-10
+- **Step 4: Watchtower Subscriptions + Notifier + UI 영속 — ✅ deployed 2026-05-10**
+  - 신규 모델 `Subscription` (user_id, category_id, subscribed, channel) + `AlertLog` (item_id nullable, channel, status, error)
+  - 신규 모듈 `monitor/watchtower/notifier.py` — NotifierService:
+    - send_instant: 신규 item → instant 구독자 메일 (60s/300s/900s 백오프, STARTTLS fail-closed, _redact, 5분/10건 rate limit)
+    - send_digest: 09:00 KST cron → channel='digest' 사용자에게 24h 카테고리별 묶음 (이미 읽은 item 제외, FR-NOTIF-008)
+    - send_owner_failure: 5회 연속 실패 site → category owner 메일 (1회 보장)
+    - SMTP 미설정 시 graceful skip (status='skipped'), AlertLog 영속
+  - 4 신규 REST endpoints:
+    - `GET /api/subscriptions` (8 row default fill)
+    - `PATCH /api/subscriptions/{cid}` (FR-SUB-002/003 자동 전환)
+    - `PATCH /api/items/{id}/read` (idempotent CSV 추가)
+    - `GET /api/alert-log?limit=100` (me.id 권한 분리)
+  - UI localStorage 완전 제거 → 서버 영속 (낙관적 UI + rollback + 한국어 토스트)
+  - main.py: NotifierService lifespan + WatchtowerWorker(notifier=...) + APScheduler `CronTrigger(hour=9, timezone="Asia/Seoul")`
+  - `.env.example`: WATCHTOWER_UI_BASE 추가
+  - 130 tests passing (104 baseline + 26 new), 0 skipped
+  - Reviewer APPROVED, Conditions 0건, Escalations 0건
+  - Smoke 검증: 8 default subs → PATCH reg=instant → 영속 → trigger 202 → AlertLog 적재
 
 ## What's Next
 
-다음 세션 시작 시 → **Step 4: Subscriptions + Notifier**
+다음 세션 시작 시 → **Step 5: Audit + Auth + Deploy**
 
-1. **Step 3 escalation 후속**:
-   - HTML 크롤러 selector 추정값 보정 (s10, s12, s16, s19, s24, s29 — `# tentative selector` 표시 사이트)
-   - enabled=false 15개 사이트 Owner 검토 (사내망 전용 URL/대체 endpoint 발굴)
-2. **Subscriptions REST API** (FR-SUB-001~005)
-   - `subscriptions` 테이블 신설 (user_id, category_id, channel)
-   - `GET/PATCH /api/subscriptions` (자기 구독만 조회·수정)
-   - UI localStorage → 서버 영속 전환 (별/벨 토글, 채널 instant/digest/off)
-   - `PATCH /api/items/{id}/read` (읽음 처리 영속)
-3. **Notifier — SMTP 즉시 + 다이제스트** (FR-NOTIF-001~008)
-   - 즉시: ⭐+🔔 둘 다 켠 카테고리 → 60초 이내 메일
-   - 다이제스트: 매일 09:00 KST → 직전 24h 묶음
-   - Step 1 SMTP 모듈(`monitor/notifier.py`) 패턴 재사용 검토
-   - 5회 실패 시 site owner 알림 (logger.error → 실 메일로 승격)
-4. **alert_log 영속** (FR-NOTIF-005) — `alert_log` 테이블 신설
-5. **Spec v0.2 보완** (B1~B4) — 별도 사이클 또는 Step 4 후미
+Watchtower MVP 마지막 사이클. 운영 가능 상태 (1.0 release candidate).
+
+1. **Step 3 잔여 처리**:
+   - HTML selector 보정 (s10/s12/s16/s19/s24/s29) — Step 4에서도 미완. 외부 환경 의존.
+   - enabled=false 15개 사이트 — Owner 환경에서 재검증 (사내망 URL/대체 endpoint)
+2. **Audit Log** (FR-AUDIT-001~003)
+   - `audit_log` 테이블 (append-only, 변조 불가)
+   - 권한 변경, 카테고리/사이트 등록·수정·삭제, 알림 발송 결과 기록
+   - 1년 보관 (FR-AUDIT-002)
+   - SIEM 연동은 옵션 (FR-AUDIT-003)
+3. **인증** (FR-USR-002~004)
+   - Phase 1 단순 토큰 (env `WATCHTOWER_TOKEN`)
+   - 미인증 요청 401 (FR-USR-003)
+   - 사내 SSO (SAML/OIDC) 는 Phase 2 (CON-006)
+4. **사이트 등록 API** (FR-SITE-002, FR-SITE-007)
+   - Owner의 `POST/PATCH/DELETE /api/sites` (자기 카테고리만)
+   - selector 검증 시뮬레이션 (옵션)
+5. **Docker compose** (NFR-COMP-002)
+   - `Dockerfile` (multi-stage)
+   - `docker-compose.yml` (단일 컨테이너 + .env volume)
+   - 폐쇄망 배포 가이드 `docs/deploy.md`
+6. **운영 매뉴얼**: README 보강 + `docs/operations.md`
+7. **Spec v0.2 보완** (B1~B4) — Step 5 후미 또는 별도 사이클
 
 ## Current Brief
 
@@ -145,7 +161,7 @@ Status: IDLE (Step 3 deployed)
 |---|---|---|---|
 | 2 ✅ | DB + Seed + UI Shell | FR-CAT-001/002, FR-SITE-001/003, FR-USR-001, FR-FEED-001/002/004/005 | 완료 |
 | 3 ✅ | Crawler + Detector + Items | FR-CRL-001~008, FR-DET-001/002, FR-SITE-005/006 | 완료 |
-| 4 | Subscriptions + Notifier | FR-SUB-001~005, FR-NOTIF-001~008 | 2일 |
+| 4 ✅ | Subscriptions + Notifier + UI 영속 | FR-SUB-001~005, FR-NOTIF-001~008, FR-FEED-006 | 완료 |
 | 5 | Audit + Auth + Deploy | FR-AUDIT-001~003, FR-USR-002~004, NFR-COMP-002 | 2일 |
 
 ## Spec 보완 작업 (Step 2 완료 후 별도 사이클)
@@ -160,7 +176,7 @@ Status: IDLE (Step 3 deployed)
 
 - Branch: claude/stoic-meitner-47d182 (worktree) → master push 완료
 - Remote: `https://github.com/2hryul2/webcrolling.git`
-- Last commit: `[Step 3] Watchtower Crawler + Detector + Items 적재`
+- Last commit: `[Step 4] Watchtower Subscriptions + Notifier + UI 영속`
 - Uncommitted files: (push 완료 후 깨끗)
 
 ## Resume Prompt (다음 세션 시작 시 사용)

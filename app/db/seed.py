@@ -20,7 +20,7 @@ from typing import Any
 import yaml
 from sqlalchemy.orm import Session
 
-from app.db.models import Category, Site, User
+from app.db.models import Category, Site, Subscription, User
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +98,40 @@ def _seed_sites(session: Session, rows: list[dict[str, Any]]) -> int:
     return inserted
 
 
+def _seed_subscriptions(session: Session) -> int:
+    """Insert one ``Subscription`` per (user, category) where missing.
+
+    Default state is ``subscribed=False, channel='off'`` (Step 4 Decision §1
+    — conservative prod policy; users opt in via the UI). Idempotent: an
+    existing (user_id, category_id) pair is left untouched.
+    """
+    user_ids = [row[0] for row in session.query(User.id).all()]
+    cat_ids = [row[0] for row in session.query(Category.id).all()]
+    if not user_ids or not cat_ids:
+        return 0
+
+    existing_pairs = {
+        (uid, cid)
+        for uid, cid in session.query(
+            Subscription.user_id, Subscription.category_id
+        ).all()
+    }
+
+    inserted = 0
+    for uid in user_ids:
+        for cid in cat_ids:
+            if (uid, cid) in existing_pairs:
+                continue
+            session.add(Subscription(
+                user_id=uid,
+                category_id=cid,
+                subscribed=False,
+                channel="off",
+            ))
+            inserted += 1
+    return inserted
+
+
 def _seed_users(session: Session, rows: list[dict[str, Any]]) -> int:
     existing = {row[0] for row in session.query(User.id).all()}
     inserted = 0
@@ -132,11 +166,15 @@ def run_seed(session: Session) -> dict[str, int]:
         "users": _seed_users(session, user_rows),
         "sites": _seed_sites(session, site_rows),
     }
+    # Flush pending category/user rows so the subscription matrix sees them.
+    session.flush()
+    counts["subscriptions"] = _seed_subscriptions(session)
     session.commit()
     if any(counts.values()):
         logger.info(
-            "[seed] inserted: %d categories / %d sites / %d users",
+            "[seed] inserted: %d categories / %d sites / %d users / %d subscriptions",
             counts["categories"], counts["sites"], counts["users"],
+            counts["subscriptions"],
         )
     else:
         logger.info("[seed] up-to-date — no rows inserted")

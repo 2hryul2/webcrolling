@@ -592,14 +592,9 @@ let ITEMS = [];
 let ME = null;
 
 // ===== State =====
-const STORAGE_KEY = 'watchtower_state_v1';
-const DEFAULT_STATE = {
-  subscribed: { reg: true, ai: true, comp: true },
-  alertOn: { reg: true, ai: true },
-  channel: { reg: 'instant', ai: 'instant', comp: 'digest' },
-};
-
-let state = loadState();
+// Step 4 — single source of truth is the server. localStorage is no longer
+// used; subscription state is fetched on boot and round-tripped through PATCH.
+let state = { subscribed: {}, alertOn: {}, channel: {} };
 let view = {
   category: 'all',
   filter: 'all',
@@ -607,15 +602,21 @@ let view = {
   modalOpen: false,
 };
 
-function loadState() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return Object.assign({}, DEFAULT_STATE, JSON.parse(raw));
-  } catch (e) {}
-  return JSON.parse(JSON.stringify(DEFAULT_STATE));
+function stateFromSubscriptions(subs) {
+  const subscribed = {}, alertOn = {}, channel = {};
+  for (const s of (subs || [])) {
+    subscribed[s.category_id] = !!s.subscribed;
+    channel[s.category_id] = s.channel || 'off';
+    alertOn[s.category_id] = !!s.subscribed && s.channel === 'instant';
+  }
+  return { subscribed, alertOn, channel };
 }
-function saveState() {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (e) {}
+
+function showToast(message) {
+  // Minimal non-blocking notice — alerts are intentionally low-tech for Phase 1.
+  // Pre-existing CSS provides no toast container, so we fall back to alert.
+  try { console.warn('[watchtower]', message); } catch (e) {}
+  try { alert(message); } catch (e) {}
 }
 
 // ===== Boot — fetch data from /api =====
@@ -639,11 +640,12 @@ async function fetchJson(url) {
 
 async function bootData() {
   try {
-    const [cats, sites, items, me] = await Promise.all([
+    const [cats, sites, items, me, subs] = await Promise.all([
       fetchJson('/api/categories'),
       fetchJson('/api/sites'),
       fetchJson('/api/items?limit=200'),
       fetchJson('/api/users/me'),
+      fetchJson('/api/subscriptions'),
     ]);
     CATEGORIES = (cats || []).map(c => ({
       id: c.id,
@@ -672,6 +674,7 @@ async function bootData() {
       read: !!it.read,
     }));
     ME = me;
+    state = stateFromSubscriptions(subs);
   } catch (e) {
     console.warn('Watchtower API 로드 실패:', e);
     document.getElementById('feed-items').innerHTML =
@@ -680,6 +683,24 @@ async function bootData() {
   }
   applyMeAvatar();
   renderAll();
+}
+
+async function patchSubscription(catId, patch) {
+  const resp = await fetch(`/api/subscriptions/${encodeURIComponent(catId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  if (!resp.ok) throw new Error(`PATCH /api/subscriptions/${catId} → ${resp.status}`);
+  return resp.json();
+}
+
+function applySubscriptionResult(result) {
+  if (!result || !result.category_id) return;
+  const cid = result.category_id;
+  state.subscribed[cid] = !!result.subscribed;
+  state.channel[cid] = result.channel || 'off';
+  state.alertOn[cid] = !!result.subscribed && result.channel === 'instant';
 }
 
 function applyMeAvatar() {
@@ -909,21 +930,12 @@ document.addEventListener('click', (e) => {
     const catId = catItem.dataset.cat;
     if (action === 'star') {
       e.stopPropagation();
-      state.subscribed[catId] = !state.subscribed[catId];
-      if (!state.subscribed[catId]) state.alertOn[catId] = false;
-      saveState();
-      renderAll();
+      toggleStar(catId);
       return;
     }
     if (action === 'bell') {
       e.stopPropagation();
-      if (!state.subscribed[catId]) {
-        // Auto-subscribe when turning bell on
-        state.subscribed[catId] = true;
-      }
-      state.alertOn[catId] = !state.alertOn[catId];
-      saveState();
-      renderAll();
+      toggleBell(catId);
       return;
     }
     view.category = catId;
@@ -961,27 +973,107 @@ document.getElementById('settings-cancel').addEventListener('click', () => {
   document.getElementById('settings-modal').classList.remove('open');
 });
 document.getElementById('settings-save').addEventListener('click', () => {
-  saveState();
+  // Channel changes already PATCHed on click; save just closes the dialog.
   document.getElementById('settings-modal').classList.remove('open');
   renderAll();
 });
 
-document.getElementById('alert-rows')?.addEventListener('click', (e) => {
+document.getElementById('alert-rows')?.addEventListener('click', async (e) => {
   const btn = e.target.closest('button[data-ch]');
   if (!btn) return;
   const seg = btn.parentElement;
   const catId = seg.dataset.cat;
   const ch = btn.dataset.ch;
+
+  // Snapshot for rollback if the network fails.
+  const prev = {
+    subscribed: state.subscribed[catId],
+    channel: state.channel[catId],
+    alertOn: state.alertOn[catId],
+  };
+
+  // Optimistic UI for snappy feedback inside the modal.
   state.channel[catId] = ch;
-  if (ch === 'instant') {
+  if (ch === 'instant' || ch === 'digest') {
     state.subscribed[catId] = true;
-    state.alertOn[catId] = true;
-  }
-  if (ch === 'off') {
+    state.alertOn[catId] = (ch === 'instant');
+  } else {
     state.alertOn[catId] = false;
   }
   renderSettings();
+
+  try {
+    const result = await patchSubscription(catId, { channel: ch });
+    applySubscriptionResult(result);
+    renderSettings();
+    renderAll();
+  } catch (err) {
+    state.subscribed[catId] = prev.subscribed;
+    state.channel[catId] = prev.channel;
+    state.alertOn[catId] = prev.alertOn;
+    renderSettings();
+    showToast('알림 채널을 저장하지 못했습니다. 다시 시도해주세요.');
+  }
 });
+
+async function toggleStar(catId) {
+  const prev = {
+    subscribed: !!state.subscribed[catId],
+    channel: state.channel[catId] || 'off',
+    alertOn: !!state.alertOn[catId],
+  };
+  const next = !prev.subscribed;
+  // Optimistic local update.
+  state.subscribed[catId] = next;
+  if (!next) {
+    state.channel[catId] = 'off';
+    state.alertOn[catId] = false;
+  }
+  renderAll();
+  try {
+    const result = await patchSubscription(catId, {
+      subscribed: next,
+      channel: next ? (prev.channel && prev.channel !== 'off' ? prev.channel : 'off') : 'off',
+    });
+    applySubscriptionResult(result);
+    renderAll();
+  } catch (err) {
+    state.subscribed[catId] = prev.subscribed;
+    state.channel[catId] = prev.channel;
+    state.alertOn[catId] = prev.alertOn;
+    renderAll();
+    showToast('구독 설정을 저장하지 못했습니다. 다시 시도해주세요.');
+  }
+}
+
+async function toggleBell(catId) {
+  const prev = {
+    subscribed: !!state.subscribed[catId],
+    channel: state.channel[catId] || 'off',
+    alertOn: !!state.alertOn[catId],
+  };
+  // Bell ON  → channel='instant' (subscribed auto-True per FR-SUB-003)
+  // Bell OFF → if currently digest, keep digest; else channel='off'
+  const turningOn = !prev.alertOn;
+  const nextChannel = turningOn ? 'instant'
+                                : (prev.channel === 'digest' ? 'digest' : 'off');
+  // Optimistic local update.
+  state.channel[catId] = nextChannel;
+  state.alertOn[catId] = turningOn;
+  if (turningOn) state.subscribed[catId] = true;
+  renderAll();
+  try {
+    const result = await patchSubscription(catId, { channel: nextChannel });
+    applySubscriptionResult(result);
+    renderAll();
+  } catch (err) {
+    state.subscribed[catId] = prev.subscribed;
+    state.channel[catId] = prev.channel;
+    state.alertOn[catId] = prev.alertOn;
+    renderAll();
+    showToast('알림 설정을 저장하지 못했습니다. 다시 시도해주세요.');
+  }
+}
 
 document.getElementById('settings-modal').addEventListener('click', (e) => {
   if (e.target.id === 'settings-modal') {
@@ -989,13 +1081,28 @@ document.getElementById('settings-modal').addEventListener('click', (e) => {
   }
 });
 
-// Step 2: mock — Step 4 will call PATCH /api/items/{id}/read.
-window.markRead = function(id) {
+// Step 4 — PATCH /api/items/{id}/read with optimistic UI + rollback on failure.
+window.markRead = async function(id) {
   const item = ITEMS.find(i => i.id === id);
-  if (item) {
-    item.read = true;
-    renderAll();
+  if (!item) return;
+  if (item.read) {
     document.getElementById('detail-panel').classList.remove('open');
+    return;
+  }
+  const prev = item.read;
+  item.read = true;
+  renderAll();
+  document.getElementById('detail-panel').classList.remove('open');
+  try {
+    const resp = await fetch(`/api/items/${encodeURIComponent(id)}/read`, {
+      method: 'PATCH',
+      headers: { 'Accept': 'application/json' },
+    });
+    if (!resp.ok) throw new Error(`PATCH /api/items/${id}/read → ${resp.status}`);
+  } catch (err) {
+    item.read = prev;
+    renderAll();
+    showToast('읽음 처리를 저장하지 못했습니다. 다시 시도해주세요.');
   }
 };
 

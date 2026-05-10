@@ -10,6 +10,7 @@ from pathlib import Path
 import uuid
 
 import yaml
+from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, Query
 from fastapi.responses import FileResponse, JSONResponse
@@ -25,6 +26,7 @@ from app.db.session import SessionLocal, init_db
 from app.routes.status import router as status_router
 from app.routes.watchtower import router as watchtower_router
 from app.scheduler import setup_scheduler
+from monitor.watchtower.notifier import NotifierService
 from monitor.watchtower.worker import WatchtowerWorker
 from monitor.worker import Worker
 
@@ -106,8 +108,16 @@ async def lifespan(app: FastAPI):
     sources_config = _load_sources_config()
     scheduler = setup_scheduler(worker, sources_config)
 
+    # Step 4 — Notifier (instant + digest + owner failure).
+    notifier_service = NotifierService(
+        session_factory=SessionLocal,
+        smtp_config=smtp_config,
+        ui_base_url=os.getenv("WATCHTOWER_UI_BASE", "http://localhost:8000"),
+    )
+    app.state.notifier = notifier_service
+
     # Step 3 — Watchtower fleet scheduling (one job per enabled Site).
-    watchtower_worker = WatchtowerWorker(SessionLocal)
+    watchtower_worker = WatchtowerWorker(SessionLocal, notifier=notifier_service)
     app.state.watchtower_worker = watchtower_worker
 
     registered = 0
@@ -136,6 +146,20 @@ async def lifespan(app: FastAPI):
         )
     except Exception as exc:
         logger.warning("Watchtower scheduler setup failed: %s", exc)
+
+    # Step 4 — daily digest cron @ 09:00 KST (FR-NOTIF-003).
+    try:
+        scheduler.add_job(
+            notifier_service.send_digest,
+            trigger=CronTrigger(hour=9, minute=0, timezone="Asia/Seoul"),
+            id="watchtower_digest_daily",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+        logger.info("Digest scheduled: 09:00 KST daily")
+    except Exception as exc:
+        logger.warning("Digest scheduler setup failed: %s", exc)
 
     scheduler.start()
 

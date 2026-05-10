@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, String, UniqueConstraint
@@ -147,3 +147,73 @@ class Item(Base):
         # Stable order = sorted; small N, cheap, predictable in tests.
         self.read_by = ",".join(sorted(existing))
         return True
+
+
+# ---------------------------------------------------------------------------
+# Step 4 — Subscription + AlertLog
+# ---------------------------------------------------------------------------
+
+
+class Subscription(Base):
+    """User × Category subscription state (FR-SUB-001).
+
+    Cardinality: at most one row per (user_id, category_id). Decoupled
+    flags keep the matrix expressive:
+
+    - ``subscribed=False``                    → not subscribed (sidebar 기타)
+    - ``subscribed=True``  + channel='off'    → ⭐ on, 🔔 off
+    - ``subscribed=True``  + channel='instant'→ ⭐ + 🔔 (즉시 알림)
+    - ``subscribed=True``  + channel='digest' → ⭐ only (일일 다이제스트)
+
+    FR-SUB-002 / FR-SUB-003 invariants are enforced at the route layer so
+    the DB stores whatever the API normalized.
+    """
+
+    __tablename__ = "subscriptions"
+    __table_args__ = (
+        UniqueConstraint("user_id", "category_id", name="uq_user_category"),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(32),
+        primary_key=True,
+        default=lambda: uuid.uuid4().hex,
+    )
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    category_id: Mapped[str] = mapped_column(ForeignKey("categories.id"))
+    subscribed: Mapped[bool] = mapped_column(Boolean, default=False)
+    # 'instant' | 'digest' | 'off'
+    channel: Mapped[str] = mapped_column(String(8), default="off")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class AlertLog(Base):
+    """Persisted record of every notifier send attempt (FR-NOTIF-005).
+
+    ``item_id`` is nullable: digest emails group multiple items into one
+    log row. ``status`` distinguishes ``sent`` / ``failed`` / ``skipped``
+    (e.g. SMTP not configured).
+    """
+
+    __tablename__ = "alert_log"
+
+    id: Mapped[str] = mapped_column(
+        String(32),
+        primary_key=True,
+        default=lambda: uuid.uuid4().hex,
+    )
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    item_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("items.id"), nullable=True
+    )
+    # 'instant' | 'digest' | 'owner_failure'
+    channel: Mapped[str] = mapped_column(String(16))
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # 'sent' | 'failed' | 'skipped'
+    status: Mapped[str] = mapped_column(String(16))
+    error_message: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    detail: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)

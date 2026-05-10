@@ -75,11 +75,13 @@ class WatchtowerWorker:
         user_agent: str = USER_AGENT,
         timeout_sec: int = DEFAULT_TIMEOUT_SEC,
         crawler_factory: Callable[[str], Crawler] | None = None,
+        notifier: Any | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._user_agent = user_agent
         self._timeout_sec = timeout_sec
         self._crawler_factory = crawler_factory or _crawler_for
+        self._notifier = notifier
 
         if max_workers is None:
             try:
@@ -159,15 +161,24 @@ class WatchtowerWorker:
             return count, should_notify
 
     def _notify_owner_failure(self, site: Site, count: int) -> None:
-        """Log-only owner notification (Step 4 will route to real channel)."""
+        """Owner notification — logger.error + Step 4 Notifier dispatch."""
         logger.error(
             "[watchtower] Site failure threshold reached: id=%s name=%s "
-            "consecutive_failures=%d category=%s — owner notification deferred to Step 4 Notifier",
+            "consecutive_failures=%d category=%s",
             site.id,
             site.name,
             count,
             site.category_id,
         )
+        if self._notifier is None:
+            return
+        try:
+            self._notifier.send_owner_failure(site.id, count)
+        except Exception as exc:  # never let notifier issues crash the worker
+            logger.warning(
+                "Owner failure notify error for site %s: %s",
+                site.id, type(exc).__name__,
+            )
 
     # ------------------------------------------------------------------
     # Single-site crawl
@@ -263,6 +274,8 @@ class WatchtowerWorker:
                 if site is not None:
                     site.status = "ok"
                     site.last_ok_at = datetime.now(timezone.utc)
+                session.flush()  # ensure default-generated Item.id are populated
+                new_item_ids = [it.id for it in new_items if it.id]
                 session.commit()
         except Exception as exc:
             logger.exception("DB commit failed for site %s", site_id)
@@ -271,6 +284,18 @@ class WatchtowerWorker:
             )
 
         self._record_success(site_id)
+
+        # Step 4 — instant notification fan-out. Failures here must NOT
+        # bubble up; the crawl itself succeeded.
+        if new_item_ids and self._notifier is not None:
+            try:
+                self._notifier.send_instant(new_item_ids)
+            except Exception as exc:
+                logger.warning(
+                    "Instant notify failed for site %s: %s",
+                    site_id, type(exc).__name__,
+                )
+
         return {
             "site_id": site_id,
             "status": "ok",

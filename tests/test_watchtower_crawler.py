@@ -602,3 +602,105 @@ def test_api_trigger_watchtower_202(monkeypatch, tmp_path):
     assert res_one.json()["site_id"] == "s17"
     # BackgroundTasks fire on response close — TestClient awaits them.
     assert captured.get("called") in {"s17", "all"}
+
+
+# ---------------------------------------------------------------------------
+# Step 4 — worker × notifier integration
+# ---------------------------------------------------------------------------
+
+
+class _RecordingNotifier:
+    """Test double for NotifierService — records arguments without sending."""
+
+    def __init__(self, *, raise_on_instant: bool = False) -> None:
+        self.instant_calls: list[list[str]] = []
+        self.owner_calls: list[tuple[str, int]] = []
+        self._raise_on_instant = raise_on_instant
+
+    def send_instant(self, item_ids):
+        ids = list(item_ids)
+        self.instant_calls.append(ids)
+        if self._raise_on_instant:
+            raise RuntimeError("simulated notifier failure")
+        return {"sent": len(ids), "failed": 0, "skipped": 0, "rolled_up": 0}
+
+    def send_owner_failure(self, site_id, consecutive_failures):
+        self.owner_calls.append((site_id, consecutive_failures))
+        return {"sent": 1, "failed": 0, "skipped": 0}
+
+    def send_digest(self):
+        return {"sent": 0, "failed": 0, "skipped": 0, "users": 0}
+
+
+def test_worker_calls_notifier_on_new_items(watchtower_db, monkeypatch):
+    """run_site → notifier.send_instant invoked with the new item ids."""
+    _bypass_robots(monkeypatch, allowed=True)
+    with watchtower_db() as session:
+        _seed_site(session, "swN1")
+
+    crawled = [
+        CrawledItem(title="N1", url="https://example.test/n1", summary=None,
+                    published_at=None, content_for_hash="N1"),
+        CrawledItem(title="N2", url="https://example.test/n2", summary=None,
+                    published_at=None, content_for_hash="N2"),
+    ]
+    stub = _StubCrawler(CrawlResult(site_id="swN1", items=crawled))
+    notifier = _RecordingNotifier()
+    worker = WatchtowerWorker(
+        watchtower_db, crawler_factory=lambda _m: stub, notifier=notifier,
+    )
+    try:
+        result = worker.run_site("swN1")
+    finally:
+        worker.shutdown()
+
+    assert result["status"] == "ok"
+    assert result["items_new"] == 2
+    assert len(notifier.instant_calls) == 1
+    sent_ids = notifier.instant_calls[0]
+    assert len(sent_ids) == 2
+    assert all(isinstance(x, str) and len(x) == 32 for x in sent_ids)
+
+
+def test_worker_calls_notifier_on_5th_failure(watchtower_db, monkeypatch):
+    """5번째 연속 실패 → notifier.send_owner_failure 호출."""
+    _bypass_robots(monkeypatch, allowed=True)
+    with watchtower_db() as session:
+        _seed_site(session, "swN2")
+
+    failure = _StubCrawler(CrawlResult(site_id="swN2", error="boom"))
+    notifier = _RecordingNotifier()
+    worker = WatchtowerWorker(
+        watchtower_db, crawler_factory=lambda _m: failure, notifier=notifier,
+    )
+    try:
+        for _ in range(5):
+            worker.run_site("swN2")
+    finally:
+        worker.shutdown()
+
+    assert notifier.owner_calls == [("swN2", 5)]
+
+
+def test_worker_handles_notifier_exception(watchtower_db, monkeypatch):
+    """Notifier raising must not break the crawl persistence."""
+    _bypass_robots(monkeypatch, allowed=True)
+    with watchtower_db() as session:
+        _seed_site(session, "swN3")
+
+    crawled = [CrawledItem(title="N", url="https://example.test/nx", summary=None,
+                           published_at=None, content_for_hash="N")]
+    stub = _StubCrawler(CrawlResult(site_id="swN3", items=crawled))
+    notifier = _RecordingNotifier(raise_on_instant=True)
+    worker = WatchtowerWorker(
+        watchtower_db, crawler_factory=lambda _m: stub, notifier=notifier,
+    )
+    try:
+        result = worker.run_site("swN3")
+    finally:
+        worker.shutdown()
+
+    assert result["status"] == "ok"
+    assert result["items_new"] == 1
+    with watchtower_db() as session:
+        assert session.query(Item).filter_by(site_id="swN3").count() == 1

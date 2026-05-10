@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from app.db.models import Category, Item, Site, User
+from app.db.models import AlertLog, Category, Item, Site, Subscription, User
 from app.db.seed import run_seed
 from app.db.import_legacy import import_legacy_events
 
@@ -88,7 +88,13 @@ def test_item_read_by_helpers(watchtower_db):
 def test_seed_loads_8_categories_30_sites_1_user(watchtower_db):
     with watchtower_db() as session:
         counts = run_seed(session)
-        assert counts == {"categories": 8, "sites": 30, "users": 1}
+        # Step 4 — Subscription default rows (1 user × 8 categories) added.
+        assert counts == {
+            "categories": 8,
+            "sites": 30,
+            "users": 1,
+            "subscriptions": 8,
+        }
         assert session.query(Category).count() == 8
         assert session.query(Site).count() == 30
         assert session.query(User).count() == 1
@@ -109,7 +115,12 @@ def test_seed_idempotent(watchtower_db):
             session.query(Site).count(),
             session.query(User).count(),
         )
-        assert counts2 == {"categories": 0, "sites": 0, "users": 0}
+        assert counts2 == {
+            "categories": 0,
+            "sites": 0,
+            "users": 0,
+            "subscriptions": 0,
+        }
         assert before == after
 
 
@@ -322,3 +333,226 @@ def test_legacy_import_idempotent(watchtower_db, tmp_path):
     assert first == 2
     assert second == 0
     assert total == 2
+
+
+# ---------------------------------------------------------------------------
+# Step 4 — /api/subscriptions
+# ---------------------------------------------------------------------------
+
+
+def test_api_subscriptions_get_returns_8_rows(watchtower_app, monkeypatch):
+    """Empty subscriptions table → still returns 8 rows (default-filled)."""
+    client, sm = watchtower_app
+    monkeypatch.setenv("WATCHTOWER_ADMIN_EMAIL", "admin@watchtower.local")
+    with sm() as session:
+        run_seed(session)
+        # Wipe subscriptions to confirm the GET still returns 8 default rows.
+        session.query(Subscription).delete()
+        session.commit()
+
+    res = client.get("/api/subscriptions")
+    assert res.status_code == 200
+    data = res.json()
+    assert isinstance(data, list)
+    assert len(data) == 8
+    for row in data:
+        assert {"category_id", "subscribed", "channel"} <= row.keys()
+        assert row["subscribed"] is False
+        assert row["channel"] == "off"
+
+
+def test_api_subscriptions_patch_creates(watchtower_app, monkeypatch):
+    """PATCH on a category with no Subscription row inserts one."""
+    client, sm = watchtower_app
+    monkeypatch.setenv("WATCHTOWER_ADMIN_EMAIL", "admin@watchtower.local")
+    with sm() as session:
+        run_seed(session)
+        session.query(Subscription).delete()
+        session.commit()
+
+    res = client.patch("/api/subscriptions/reg", json={"subscribed": True})
+    assert res.status_code == 200
+    body = res.json()
+    assert body == {
+        "category_id": "reg",
+        "subscribed": True,
+        "channel": "off",
+        "updated_at": body["updated_at"],
+    }
+    with sm() as session:
+        rows = session.query(Subscription).filter_by(category_id="reg").all()
+        assert len(rows) == 1
+        assert rows[0].subscribed is True
+        assert rows[0].channel == "off"
+
+
+def test_api_subscriptions_patch_updates(watchtower_app, monkeypatch):
+    """Successive PATCH calls update updated_at and current state."""
+    client, sm = watchtower_app
+    monkeypatch.setenv("WATCHTOWER_ADMIN_EMAIL", "admin@watchtower.local")
+    with sm() as session:
+        run_seed(session)
+
+    # First PATCH — channel=instant; FR-SUB-003 forces subscribed=True.
+    first = client.patch("/api/subscriptions/ai", json={"channel": "instant"}).json()
+    assert first["subscribed"] is True
+    assert first["channel"] == "instant"
+
+    # Second PATCH — flip subscribed off; FR-SUB-002 forces channel='off'.
+    second = client.patch("/api/subscriptions/ai", json={"subscribed": False}).json()
+    assert second["subscribed"] is False
+    assert second["channel"] == "off"
+    # updated_at should advance.
+    assert second["updated_at"] >= first["updated_at"]
+
+
+def test_api_subscriptions_unsubscribe_forces_off(watchtower_app, monkeypatch):
+    """FR-SUB-002 — subscribed=False normalizes channel to 'off'."""
+    client, sm = watchtower_app
+    monkeypatch.setenv("WATCHTOWER_ADMIN_EMAIL", "admin@watchtower.local")
+    with sm() as session:
+        run_seed(session)
+
+    # Pre-load with channel='digest'.
+    client.patch("/api/subscriptions/comp", json={"channel": "digest"})
+    # Now turn subscribed off.
+    res = client.patch("/api/subscriptions/comp", json={"subscribed": False})
+    body = res.json()
+    assert body["subscribed"] is False
+    assert body["channel"] == "off"
+
+
+def test_api_subscriptions_instant_forces_subscribe(watchtower_app, monkeypatch):
+    """FR-SUB-003 — channel='instant' or 'digest' forces subscribed=True."""
+    client, sm = watchtower_app
+    monkeypatch.setenv("WATCHTOWER_ADMIN_EMAIL", "admin@watchtower.local")
+    with sm() as session:
+        run_seed(session)
+        # Ensure baseline is unsubscribed.
+        session.query(Subscription).delete()
+        session.commit()
+
+    res = client.patch("/api/subscriptions/sec", json={"channel": "instant"})
+    body = res.json()
+    assert body["subscribed"] is True
+    assert body["channel"] == "instant"
+
+
+def test_api_subscriptions_validates_channel_enum(watchtower_app, monkeypatch):
+    """Bad channel values are rejected with 422."""
+    client, sm = watchtower_app
+    monkeypatch.setenv("WATCHTOWER_ADMIN_EMAIL", "admin@watchtower.local")
+    with sm() as session:
+        run_seed(session)
+
+    res = client.patch("/api/subscriptions/reg", json={"channel": "invalid"})
+    assert res.status_code == 422
+
+
+def test_api_subscriptions_unknown_category_404(watchtower_app, monkeypatch):
+    """PATCH against a non-existent category id → 404."""
+    client, sm = watchtower_app
+    monkeypatch.setenv("WATCHTOWER_ADMIN_EMAIL", "admin@watchtower.local")
+    with sm() as session:
+        run_seed(session)
+
+    res = client.patch("/api/subscriptions/no_such_cat", json={"subscribed": True})
+    assert res.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Step 4 — PATCH /api/items/{id}/read
+# ---------------------------------------------------------------------------
+
+
+def test_api_items_read_marks_user(watchtower_app, monkeypatch):
+    """PATCH /api/items/{id}/read appends me.id to read_by."""
+    client, sm = watchtower_app
+    monkeypatch.setenv("WATCHTOWER_ADMIN_EMAIL", "admin@watchtower.local")
+    with sm() as session:
+        run_seed(session)
+        session.add(Item(
+            id="iread1", site_id="s2", type="NEW", title="r", url="https://x/r",
+            content_hash="r" * 64, detected_at=datetime.now(timezone.utc), read_by="",
+        ))
+        session.commit()
+
+    res = client.patch("/api/items/iread1/read")
+    assert res.status_code == 200
+    body = res.json()
+    assert body == {"id": "iread1", "read": True}
+
+    with sm() as session:
+        item = session.get(Item, "iread1")
+        assert item.is_read_by("u1")
+
+
+def test_api_items_read_idempotent(watchtower_app, monkeypatch):
+    """Calling PATCH twice produces the same read_by set."""
+    client, sm = watchtower_app
+    monkeypatch.setenv("WATCHTOWER_ADMIN_EMAIL", "admin@watchtower.local")
+    with sm() as session:
+        run_seed(session)
+        session.add(Item(
+            id="iread2", site_id="s2", type="NEW", title="r", url="https://x/r2",
+            content_hash="q" * 64, detected_at=datetime.now(timezone.utc), read_by="",
+        ))
+        session.commit()
+
+    client.patch("/api/items/iread2/read")
+    client.patch("/api/items/iread2/read")
+    with sm() as session:
+        item = session.get(Item, "iread2")
+        assert item.read_by == "u1"  # exactly once
+
+
+def test_api_items_read_404(watchtower_app, monkeypatch):
+    """Non-existent item → 404."""
+    client, sm = watchtower_app
+    monkeypatch.setenv("WATCHTOWER_ADMIN_EMAIL", "admin@watchtower.local")
+    with sm() as session:
+        run_seed(session)
+
+    res = client.patch("/api/items/no_such_item/read")
+    assert res.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Step 4 — /api/alert-log
+# ---------------------------------------------------------------------------
+
+
+def test_api_alert_log_returns_user_rows_only(watchtower_app, monkeypatch):
+    """GET /api/alert-log only returns rows owned by the resolved me user."""
+    client, sm = watchtower_app
+    monkeypatch.setenv("WATCHTOWER_ADMIN_EMAIL", "admin@watchtower.local")
+    with sm() as session:
+        run_seed(session)
+        session.add(User(id="u2", name="other", dept="x", email="other@example.com"))
+        session.flush()  # ensure u2 lands before FK-constrained alert_log rows
+        now = datetime.now(timezone.utc)
+        session.add_all([
+            AlertLog(id="a1", user_id="u1", item_id=None, channel="instant",
+                     sent_at=now, status="sent"),
+            AlertLog(id="a2", user_id="u1", item_id=None, channel="digest",
+                     sent_at=now, status="skipped",
+                     error_message="SMTP not configured"),
+            AlertLog(id="a3", user_id="u2", item_id=None, channel="instant",
+                     sent_at=now, status="sent"),
+        ])
+        session.commit()
+
+    res = client.get("/api/alert-log")
+    assert res.status_code == 200
+    data = res.json()
+    ids = sorted(r["id"] for r in data)
+    assert ids == ["a1", "a2"]
+
+
+def test_api_alert_log_limit_clamp(watchtower_app, monkeypatch):
+    """limit=0 / limit>1000 → 422."""
+    client, sm = watchtower_app
+    with sm() as session:
+        run_seed(session)
+    assert client.get("/api/alert-log?limit=0").status_code == 422
+    assert client.get("/api/alert-log?limit=2000").status_code == 422
