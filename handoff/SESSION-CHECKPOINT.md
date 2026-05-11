@@ -96,9 +96,11 @@ Status: IDLE (Step 4 deployed)
 
 Watchtower MVP 마지막 사이클. 운영 가능 상태 (1.0 release candidate).
 
+> **배포 조건 변경 (2026-05-11 확정)**: 기존 가정 `사내 폐쇄망 + 단일 프로세스 + Windows 개발/Linux 운영` → **`일반 인터넷 망 + Windows 개발 및 운영`**. Docker/Harbor 라인 폐기, Windows 네이티브 서비스로 전환. 단일 프로세스는 코드 레벨 사실(in-memory rate limit, single APScheduler)로 유지되지만, 배포가 강제하지 않음 — Phase 2에서 멀티 프로세스 필요 시 rate limit 외부 캐시화 별도 의제.
+
 1. **Step 3 잔여 처리**:
    - HTML selector 보정 (s10/s12/s16/s19/s24/s29) — Step 4에서도 미완. 외부 환경 의존.
-   - enabled=false 15개 사이트 — Owner 환경에서 재검증 (사내망 URL/대체 endpoint)
+   - enabled=false 15개 사이트 — 일반 인터넷 URL 기준 재검증 (사내망 URL 가정 제거)
 2. **Audit Log** (FR-AUDIT-001~003)
    - `audit_log` 테이블 (append-only, 변조 불가)
    - 권한 변경, 카테고리/사이트 등록·수정·삭제, 알림 발송 결과 기록
@@ -108,14 +110,24 @@ Watchtower MVP 마지막 사이클. 운영 가능 상태 (1.0 release candidate)
    - Phase 1 단순 토큰 (env `WATCHTOWER_TOKEN`)
    - 미인증 요청 401 (FR-USR-003)
    - 사내 SSO (SAML/OIDC) 는 Phase 2 (CON-006)
+   - **인터넷 노출 가산점**: HTTPS 필수 (리버스 프록시 IIS/nginx-for-Windows/Caddy), 토큰 로테이션 가이드, 로그인 시도 IP 카운팅 — Phase 2 본격 대응, Phase 1은 토큰 + 외부 노출 시 reverse proxy 권고만 명시.
 4. **사이트 등록 API** (FR-SITE-002, FR-SITE-007)
    - Owner의 `POST/PATCH/DELETE /api/sites` (자기 카테고리만)
    - selector 검증 시뮬레이션 (옵션)
-5. **Docker compose** (NFR-COMP-002)
-   - `Dockerfile` (multi-stage)
-   - `docker-compose.yml` (단일 컨테이너 + .env volume)
-   - 폐쇄망 배포 가이드 `docs/deploy.md`
+5. **Windows 네이티브 배포** (NFR-COMP-002) — Docker 폐기
+   - **서비스 등록**: NSSM(Non-Sucking Service Manager) 기반 Windows Service 등록 스크립트 (`scripts/install_service.ps1`, `scripts/uninstall_service.ps1`). `uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1` 을 자동 재시작 옵션과 함께 service 등록.
+   - **인스톨러**: PyInstaller one-folder 빌드 또는 Inno Setup 기반 `dist\setup\setup_v{VERSION}.exe` (CLAUDE.md 표준 경로). Python 런타임 임베디드 포함 or 사전 요구사항 명시 (Python 3.11+).
+   - **데이터/로그 경로** (CLAUDE.md 정책):
+     - 데이터: `%APPDATA%\claude_webcroll\` — SQLite, JSONL, state.json
+     - 로그: `%LOCALAPPDATA%\claude_webcroll\logs\` — 일자별 rotate, 30일 보관
+     - 현재 `BASE_DIR/data` 하드코딩은 `WATCHTOWER_DATA_DIR` 환경변수로 빼고, 기본값을 위 경로로 조정 (개발은 `--data-dir ./data` 오버라이드)
+   - **설정 파일**: `.env`를 `%APPDATA%\claude_webcroll\.env` 로 이동 (인스톨러가 `.env.example` 복사 후 사용자 편집 유도)
+   - **방화벽 / 인터넷 노출**: 인터넷 직접 노출은 비권장 → 동일 호스트의 reverse proxy(Caddy/Nginx) 뒤 배치, Windows Firewall 인바운드 규칙은 8000 포트 localhost 전용 권장. `docs/deploy.md` 에 표준 토폴로지(Caddy + 자동 HTTPS) 1개 예시 등재.
+   - **배포 가이드**: `docs/deploy.md` (인스톨러 실행 → service 등록 확인 → `.env` 설정 → 초기 부팅 검증 → 헬스체크 `GET /status`)
 6. **운영 매뉴얼**: README 보강 + `docs/operations.md`
+   - Windows event log / nssm 로그 확인 방법
+   - 백업/복원 (SQLite + JSONL + `.env`)
+   - 업그레이드 절차 (service 중지 → 인스톨러 실행 → 마이그레이션 → service 재기동)
 7. **Spec v0.2 보완** (B1~B4) — Step 5 후미 또는 별도 사이클
 
 ## Current Brief

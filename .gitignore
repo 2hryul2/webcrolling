@@ -33,6 +33,8 @@ __pycache__/
 *$py.class
 .pytest_cache/
 *.egg-info/
+.venv/
+venv/
 
 # Project data
 data/*.jsonl
