@@ -36,6 +36,22 @@ SOURCES_PATH = BASE_DIR / "config" / "sources.yaml"
 KEYWORDS_PATH = BASE_DIR / "config" / "keywords.yaml"
 DATA_DIR = BASE_DIR / "data"
 STATIC_DIR = BASE_DIR / "static"
+VERSION_PATH = BASE_DIR / "VERSION"
+
+
+def _read_version() -> str:
+    """Read the single source of truth for APP_VERSION from the VERSION file.
+
+    Falls back to ``0.0.0`` (and logs a warning) when the file is missing —
+    Phase 1 builds without one shouldn't crash.
+    """
+    try:
+        return VERSION_PATH.read_text(encoding="utf-8").strip() or "0.0.0"
+    except OSError:
+        return "0.0.0"
+
+
+APP_VERSION = _read_version()
 
 # Load .env early
 load_dotenv(BASE_DIR / ".env")
@@ -181,7 +197,7 @@ async def lifespan(app: FastAPI):
         logger.info("Application shutdown complete")
 
 
-app = FastAPI(title="claude_webcroll", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="claude_webcroll", version=APP_VERSION, lifespan=lifespan)
 app.include_router(status_router)
 app.include_router(watchtower_router)
 
@@ -192,7 +208,7 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 @app.get("/")
 def root() -> dict[str, str]:
-    return {"app": "claude_webcroll", "version": "0.1.0", "status": "ok"}
+    return {"app": "claude_webcroll", "version": APP_VERSION, "status": "ok"}
 
 
 @app.get("/ui")

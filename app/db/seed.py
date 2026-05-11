@@ -20,7 +20,13 @@ from typing import Any
 import yaml
 from sqlalchemy.orm import Session
 
-from app.db.models import Category, Site, Subscription, User
+from app.db.models import (
+    CategorySubscription,
+    Category,
+    Site,
+    SiteSubscription,
+    User,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -98,8 +104,8 @@ def _seed_sites(session: Session, rows: list[dict[str, Any]]) -> int:
     return inserted
 
 
-def _seed_subscriptions(session: Session) -> int:
-    """Insert one ``Subscription`` per (user, category) where missing.
+def _seed_category_subscriptions(session: Session) -> int:
+    """Insert one ``CategorySubscription`` per (user, category) where missing.
 
     Default state is ``subscribed=False, channel='off'`` (Step 4 Decision §1
     — conservative prod policy; users opt in via the UI). Idempotent: an
@@ -113,7 +119,7 @@ def _seed_subscriptions(session: Session) -> int:
     existing_pairs = {
         (uid, cid)
         for uid, cid in session.query(
-            Subscription.user_id, Subscription.category_id
+            CategorySubscription.user_id, CategorySubscription.category_id
         ).all()
     }
 
@@ -122,13 +128,98 @@ def _seed_subscriptions(session: Session) -> int:
         for cid in cat_ids:
             if (uid, cid) in existing_pairs:
                 continue
-            session.add(Subscription(
+            session.add(CategorySubscription(
                 user_id=uid,
                 category_id=cid,
                 subscribed=False,
                 channel="off",
             ))
             inserted += 1
+    return inserted
+
+
+def _seed_site_subscriptions(session: Session) -> int:
+    """Insert one ``SiteSubscription`` per (user, site) where missing (FR-MIG-002).
+
+    Default ``enabled=False`` — sites must be explicitly opted in to gate
+    the AND filter (FR-NOTIF-009). Idempotent.
+    """
+    user_ids = [row[0] for row in session.query(User.id).all()]
+    site_ids = [row[0] for row in session.query(Site.id).all()]
+    if not user_ids or not site_ids:
+        return 0
+
+    existing_pairs = {
+        (uid, sid)
+        for uid, sid in session.query(
+            SiteSubscription.user_id, SiteSubscription.site_id
+        ).all()
+    }
+
+    inserted = 0
+    for uid in user_ids:
+        for sid in site_ids:
+            if (uid, sid) in existing_pairs:
+                continue
+            session.add(SiteSubscription(
+                user_id=uid,
+                site_id=sid,
+                enabled=False,
+            ))
+            inserted += 1
+    return inserted
+
+
+def create_default_site_subscriptions_for_new_site(
+    session: Session, site_id: str
+) -> int:
+    """Step 5 hook — pre-fill SiteSubscription for every user when a new Site lands.
+
+    Called by the future ``POST /api/sites`` admin endpoint (FR-SITE-002) right
+    after the ``Site`` row is committed. For each existing user, inserts a
+    ``SiteSubscription`` with ``enabled = CategorySubscription.subscribed`` for
+    the site's category — matching the user's confirmed default policy
+    (ideation §7-b → "카테고리 별 ⭐ 상태 따름").
+
+    Idempotent: existing (user, site) pairs are skipped.
+
+    Returns the count of rows actually inserted.
+    """
+    site = session.get(Site, site_id)
+    if site is None:
+        return 0
+
+    user_ids = [row[0] for row in session.query(User.id).all()]
+    if not user_ids:
+        return 0
+
+    existing_users = {
+        sub.user_id
+        for sub in session.query(SiteSubscription).filter_by(site_id=site_id).all()
+    }
+
+    # Pull category subscription state for the site's category, per user.
+    cat_subs = {
+        sub.user_id: bool(sub.subscribed)
+        for sub in session.query(CategorySubscription).filter_by(
+            category_id=site.category_id
+        ).all()
+    }
+
+    inserted = 0
+    for uid in user_ids:
+        if uid in existing_users:
+            continue
+        enabled = cat_subs.get(uid, False)
+        session.add(SiteSubscription(
+            user_id=uid,
+            site_id=site_id,
+            enabled=enabled,
+        ))
+        inserted += 1
+
+    if inserted:
+        session.flush()
     return inserted
 
 
@@ -166,15 +257,19 @@ def run_seed(session: Session) -> dict[str, int]:
         "users": _seed_users(session, user_rows),
         "sites": _seed_sites(session, site_rows),
     }
-    # Flush pending category/user rows so the subscription matrix sees them.
+    # Flush pending category/user/site rows so the subscription matrices see them.
     session.flush()
-    counts["subscriptions"] = _seed_subscriptions(session)
+    counts["category_subscriptions"] = _seed_category_subscriptions(session)
+    counts["site_subscriptions"] = _seed_site_subscriptions(session)
+    # Legacy key retained for callers that grep counts["subscriptions"].
+    counts["subscriptions"] = counts["category_subscriptions"]
     session.commit()
     if any(counts.values()):
         logger.info(
-            "[seed] inserted: %d categories / %d sites / %d users / %d subscriptions",
+            "[seed] inserted: %d categories / %d sites / %d users / "
+            "%d category_subscriptions / %d site_subscriptions",
             counts["categories"], counts["sites"], counts["users"],
-            counts["subscriptions"],
+            counts["category_subscriptions"], counts["site_subscriptions"],
         )
     else:
         logger.info("[seed] up-to-date — no rows inserted")

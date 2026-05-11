@@ -154,7 +154,7 @@ class Item(Base):
 # ---------------------------------------------------------------------------
 
 
-class Subscription(Base):
+class CategorySubscription(Base):
     """User × Category subscription state (FR-SUB-001).
 
     Cardinality: at most one row per (user_id, category_id). Decoupled
@@ -165,11 +165,16 @@ class Subscription(Base):
     - ``subscribed=True``  + channel='instant'→ ⭐ + 🔔 (즉시 알림)
     - ``subscribed=True``  + channel='digest' → ⭐ only (일일 다이제스트)
 
+    Renamed from ``Subscription`` in Step 4.5 — site-level granularity now
+    lives in :class:`SiteSubscription`, so "구독" without qualifier is
+    ambiguous. The migration helper in :mod:`app.db.session` copies rows
+    from the legacy ``subscriptions`` table on first boot.
+
     FR-SUB-002 / FR-SUB-003 invariants are enforced at the route layer so
     the DB stores whatever the API normalized.
     """
 
-    __tablename__ = "subscriptions"
+    __tablename__ = "category_subscriptions"
     __table_args__ = (
         UniqueConstraint("user_id", "category_id", name="uq_user_category"),
     )
@@ -184,6 +189,39 @@ class Subscription(Base):
     subscribed: Mapped[bool] = mapped_column(Boolean, default=False)
     # 'instant' | 'digest' | 'off'
     channel: Mapped[str] = mapped_column(String(8), default="off")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class SiteSubscription(Base):
+    """User × Site monitoring toggle (Step 4.5 — FR-SUB-006).
+
+    Acts as the per-site half of the AND filter: an item is delivered to a
+    user only if BOTH the matching ``CategorySubscription`` is active
+    (``subscribed=True`` and ``channel ∈ {'instant','digest'}``) AND a row
+    here has ``enabled=True``.
+
+    System-level ``Site.enabled=False`` always wins — the route layer
+    refuses ``{enabled: true}`` PATCH attempts on disabled sites
+    (FR-SUB-007).
+    """
+
+    __tablename__ = "site_subscriptions"
+    __table_args__ = (
+        UniqueConstraint("user_id", "site_id", name="uq_user_site"),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(32),
+        primary_key=True,
+        default=lambda: uuid.uuid4().hex,
+    )
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    site_id: Mapped[str] = mapped_column(ForeignKey("sites.id"))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),

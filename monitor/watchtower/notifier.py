@@ -42,10 +42,11 @@ from sqlalchemy import select
 
 from app.db.models import (
     AlertLog,
+    CategorySubscription,
     Category,
     Item,
     Site,
-    Subscription,
+    SiteSubscription,
     User,
 )
 
@@ -174,24 +175,39 @@ class NotifierService:
                 return {"sent": 0, "failed": 0, "skipped": 0, "rolled_up": 0}
 
             # Subscribers are recomputed per-category so we don't load every
-            # subscription up front.
-            cat_subscribers: dict[str, list[User]] = {}
-            for _item, _site, cat in rows:
-                if cat.id in cat_subscribers:
+            # subscription up front. AND-gate the per-site enabled flag
+            # (FR-NOTIF-009) by joining SiteSubscription with the item's
+            # site_id; system_enabled is enforced via Site.enabled.
+            cat_subscribers: dict[tuple[str, str], list[User]] = {}
+            for _item, site, cat in rows:
+                key = (cat.id, site.id)
+                if key in cat_subscribers:
+                    continue
+                if not site.enabled:
+                    cat_subscribers[key] = []
                     continue
                 subs = session.execute(
                     select(User)
-                    .join(Subscription, Subscription.user_id == User.id)
+                    .join(
+                        CategorySubscription,
+                        CategorySubscription.user_id == User.id,
+                    )
+                    .join(
+                        SiteSubscription,
+                        SiteSubscription.user_id == User.id,
+                    )
                     .where(
-                        Subscription.category_id == cat.id,
-                        Subscription.subscribed.is_(True),
-                        Subscription.channel == "instant",
+                        CategorySubscription.category_id == cat.id,
+                        CategorySubscription.subscribed.is_(True),
+                        CategorySubscription.channel == "instant",
+                        SiteSubscription.site_id == site.id,
+                        SiteSubscription.enabled.is_(True),
                     )
                 ).scalars().all()
-                cat_subscribers[cat.id] = list(subs)
+                cat_subscribers[key] = list(subs)
 
             for item, site, cat in rows:
-                subscribers = cat_subscribers.get(cat.id, [])
+                subscribers = cat_subscribers.get((cat.id, site.id), [])
                 if not subscribers:
                     continue
 
@@ -268,11 +284,11 @@ class NotifierService:
         with self._session_factory() as session:
             # Fetch every digest subscription joined to its user.
             sub_rows = session.execute(
-                select(Subscription, User)
-                .join(User, Subscription.user_id == User.id)
+                select(CategorySubscription, User)
+                .join(User, CategorySubscription.user_id == User.id)
                 .where(
-                    Subscription.subscribed.is_(True),
-                    Subscription.channel == "digest",
+                    CategorySubscription.subscribed.is_(True),
+                    CategorySubscription.channel == "digest",
                 )
             ).all()
             if not sub_rows:
@@ -304,13 +320,22 @@ class NotifierService:
                     users_processed += 1
                     continue
 
-                # Pull candidate items in those categories detected within 24h.
+                # FR-NOTIF-009 AND-gate: only items whose site is BOTH
+                # system_enabled AND personally enabled by this user.
+                # JOIN site_subscriptions WHERE enabled=True.
                 rows = session.execute(
                     select(Item, Site, Category)
                     .join(Site, Item.site_id == Site.id)
                     .join(Category, Site.category_id == Category.id)
+                    .join(
+                        SiteSubscription,
+                        SiteSubscription.site_id == Site.id,
+                    )
                     .where(
                         Site.category_id.in_(cat_ids),
+                        Site.enabled.is_(True),
+                        SiteSubscription.user_id == uid,
+                        SiteSubscription.enabled.is_(True),
                         Item.detected_at >= cutoff,
                     )
                     .order_by(Item.detected_at.desc())

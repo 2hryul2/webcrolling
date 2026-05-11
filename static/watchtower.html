@@ -221,6 +221,95 @@ a { color: inherit; text-decoration: none; }
   background: var(--surface);
   color: var(--accent);
 }
+
+/* Accordion toggle for site list inside each category (Step 4.5 — FR-UI-006) */
+.cat-item .accordion-toggle {
+  width: 16px; height: 16px;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  font-size: 10px;
+  color: var(--text-3);
+  transition: transform 0.12s;
+  user-select: none;
+}
+.cat-item .accordion-toggle.spacer { visibility: hidden; }
+.site-fraction {
+  font-size: 10px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  padding: 0 4px;
+  letter-spacing: -0.02em;
+}
+.cat-item.active .site-fraction { color: var(--accent); }
+.site-list {
+  list-style: none;
+  margin: 4px 0 6px 22px;
+  padding: 0;
+  border-left: 1px dashed var(--border);
+}
+.site-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 4px 10px;
+  font-size: 12px;
+  color: var(--text-2);
+  border-radius: var(--radius-sm);
+  cursor: default;
+}
+.site-item:hover { background: var(--surface-2); }
+.site-item input[type="checkbox"] {
+  width: 14px; height: 14px;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+.site-item input[type="checkbox"]:disabled { cursor: not-allowed; }
+.site-item.disabled {
+  color: var(--text-3);
+  cursor: not-allowed;
+}
+.site-item.disabled .site-name { text-decoration: line-through; opacity: 0.6; }
+.site-name {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.site-status-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.site-status-dot.ok       { background: #10b981; } /* green */
+.site-status-dot.delayed  { background: #f59e0b; } /* amber */
+.site-status-dot.failed   { background: #ef4444; } /* red */
+.site-status-dot.blocked  { background: #6b7280; } /* gray */
+
+/* Toast for optimistic-UI rollback messages (Step 4.5 — replaces alert()) */
+.toast-container {
+  position: fixed;
+  bottom: 20px; right: 20px;
+  display: flex; flex-direction: column; gap: 8px;
+  z-index: 9999;
+  pointer-events: none;
+}
+.toast {
+  background: var(--text-1);
+  color: white;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.18);
+  opacity: 0;
+  transform: translateY(10px);
+  transition: opacity 0.2s, transform 0.2s;
+  pointer-events: auto;
+  max-width: 320px;
+}
+.toast.show { opacity: 1; transform: translateY(0); }
+.toast.error { background: #b91c1c; }
+
 .settings-btn {
   margin-top: auto;
   padding: 9px 12px;
@@ -516,7 +605,7 @@ a { color: inherit; text-decoration: none; }
 
   <section class="health-strip">
     <div class="health-card">
-      <div class="health-label">정상 사이트</div>
+      <div class="health-label" title="시스템 활성 사이트 중 마지막 크롤이 ok인 사이트 / 시스템 활성 사이트 총합">활성 사이트</div>
       <div class="health-value numeric"><span id="h-active">0</span><span class="total"> / <span id="h-total">0</span></span></div>
     </div>
     <div class="health-card">
@@ -567,6 +656,8 @@ a { color: inherit; text-decoration: none; }
   </div>
 </div>
 
+<div class="toast-container" id="toast-container"></div>
+
 <aside class="detail-panel" id="detail-panel">
   <button class="detail-close" id="detail-close">×</button>
   <div id="detail-content"></div>
@@ -594,7 +685,38 @@ let ME = null;
 // ===== State =====
 // Step 4 — single source of truth is the server. localStorage is no longer
 // used; subscription state is fetched on boot and round-tripped through PATCH.
-let state = { subscribed: {}, alertOn: {}, channel: {} };
+// Per-tab accordion expansion state (sessionStorage, NOT localStorage).
+// sessionStorage clears when the tab closes — keeps the "single source of
+// truth = server" promise for subscription data while still letting users
+// keep their layout while navigating within one session.
+const ACCORDION_STORAGE_KEY = 'watchtower_accordion_v1';
+
+function loadAccordionState() {
+  try {
+    const raw = sessionStorage.getItem(ACCORDION_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return (parsed && typeof parsed === 'object') ? parsed : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function saveAccordionState(stateObj) {
+  try {
+    sessionStorage.setItem(ACCORDION_STORAGE_KEY, JSON.stringify(stateObj || {}));
+  } catch (e) {
+    // Silent — quota exceeded or sessionStorage disabled (private mode).
+  }
+}
+
+let state = {
+  subscribed: {},   // categoryId → bool (CategorySubscription.subscribed)
+  alertOn: {},      // categoryId → bool (subscribed && channel='instant')
+  channel: {},      // categoryId → 'instant'|'digest'|'off'
+  siteEnabled: {},  // siteId → bool (SiteSubscription.enabled — Step 4.5 FR-SUB-006)
+  expanded: {},     // categoryId → bool (accordion UI, persisted in sessionStorage)
+};
 let view = {
   category: 'all',
   filter: 'all',
@@ -612,11 +734,29 @@ function stateFromSubscriptions(subs) {
   return { subscribed, alertOn, channel };
 }
 
-function showToast(message) {
-  // Minimal non-blocking notice — alerts are intentionally low-tech for Phase 1.
-  // Pre-existing CSS provides no toast container, so we fall back to alert.
+function siteEnabledFromSubs(subs) {
+  const out = {};
+  for (const s of (subs || [])) out[s.site_id] = !!s.enabled;
+  return out;
+}
+
+function showToast(message, opts) {
+  const isError = !!(opts && opts.error);
   try { console.warn('[watchtower]', message); } catch (e) {}
-  try { alert(message); } catch (e) {}
+  const container = document.getElementById('toast-container');
+  if (!container) { try { alert(message); } catch (e) {} return; }
+  const toast = document.createElement('div');
+  toast.className = 'toast' + (isError ? ' error' : '');
+  toast.textContent = message;
+  container.appendChild(toast);
+  // Force reflow so the transition fires.
+  // eslint-disable-next-line no-unused-expressions
+  toast.offsetWidth;
+  toast.classList.add('show');
+  setTimeout(() => {
+    toast.classList.remove('show');
+    setTimeout(() => toast.remove(), 250);
+  }, 3000);
 }
 
 // ===== Boot — fetch data from /api =====
@@ -640,12 +780,13 @@ async function fetchJson(url) {
 
 async function bootData() {
   try {
-    const [cats, sites, items, me, subs] = await Promise.all([
+    const [cats, sites, items, me, catSubs, siteSubs] = await Promise.all([
       fetchJson('/api/categories'),
       fetchJson('/api/sites'),
       fetchJson('/api/items?limit=200'),
       fetchJson('/api/users/me'),
-      fetchJson('/api/subscriptions'),
+      fetchJson('/api/category-subscriptions'),
+      fetchJson('/api/site-subscriptions'),
     ]);
     CATEGORIES = (cats || []).map(c => ({
       id: c.id,
@@ -660,6 +801,7 @@ async function bootData() {
       cat: s.category_id,
       status: s.status || 'ok',
       url: s.url,
+      systemEnabled: s.enabled !== false, // /api/sites omits enabled in payload — see note below
     }));
     ITEMS = (items || []).map(it => ({
       id: it.id,
@@ -674,7 +816,22 @@ async function bootData() {
       read: !!it.read,
     }));
     ME = me;
-    state = stateFromSubscriptions(subs);
+    const catState = stateFromSubscriptions(catSubs);
+    state.subscribed = catState.subscribed;
+    state.alertOn = catState.alertOn;
+    state.channel = catState.channel;
+    state.siteEnabled = siteEnabledFromSubs(siteSubs);
+    // Accordion: sessionStorage restore (탭 단위 영속). 빈 경우 default
+    // rule — 구독 카테고리는 expand, 기타는 collapse.
+    const restored = loadAccordionState();
+    state.expanded = {};
+    for (const c of CATEGORIES) {
+      if (restored && Object.prototype.hasOwnProperty.call(restored, c.id)) {
+        state.expanded[c.id] = !!restored[c.id];
+      } else {
+        state.expanded[c.id] = !!state.subscribed[c.id];
+      }
+    }
   } catch (e) {
     console.warn('Watchtower API 로드 실패:', e);
     document.getElementById('feed-items').innerHTML =
@@ -686,12 +843,26 @@ async function bootData() {
 }
 
 async function patchSubscription(catId, patch) {
-  const resp = await fetch(`/api/subscriptions/${encodeURIComponent(catId)}`, {
+  const resp = await fetch(`/api/category-subscriptions/${encodeURIComponent(catId)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(patch),
   });
-  if (!resp.ok) throw new Error(`PATCH /api/subscriptions/${catId} → ${resp.status}`);
+  if (!resp.ok) throw new Error(`PATCH /api/category-subscriptions/${catId} → ${resp.status}`);
+  return resp.json();
+}
+
+async function patchSiteSubscription(siteId, enabled) {
+  const resp = await fetch(`/api/site-subscriptions/${encodeURIComponent(siteId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled: !!enabled }),
+  });
+  if (!resp.ok) {
+    let detail = '';
+    try { detail = (await resp.json()).detail || ''; } catch (e) {}
+    throw new Error(detail || `PATCH /api/site-subscriptions/${siteId} → ${resp.status}`);
+  }
   return resp.json();
 }
 
@@ -727,16 +898,28 @@ function unreadByCat(catId) {
 
 // ===== Rendering =====
 function renderHealth() {
-  const ok = SITES.filter(s => s.status === 'ok').length;
-  document.getElementById('h-active').textContent = ok;
-  document.getElementById('h-total').textContent = SITES.length;
+  // "활성 사이트 X / Y" — Step 4.5: system-enabled 사이트만 분모/분자로 카운트.
+  // YAML seed의 15개 system-disabled 사이트는 모니터링 후보가 아니므로 제외한다.
+  const activeSites = SITES.filter(s => s.systemEnabled !== false);
+  const okCount = activeSites.filter(s => s.status === 'ok').length;
+  document.getElementById('h-active').textContent = okCount;
+  document.getElementById('h-total').textContent = activeSites.length;
+
   const newCount = ITEMS.filter(i => i.type === 'NEW' && !i.read).length;
   const chCount = ITEMS.filter(i => i.type === 'CHANGE' && !i.read).length;
   document.getElementById('h-new').textContent = newCount;
   document.getElementById('h-change').textContent = chCount;
-  let pending = 0;
-  ITEMS.filter(i => !i.read && isAlertOn(i.cat) && getChannel(i.cat) === 'instant')
-    .forEach(() => pending++);
+
+  // h-pending: AND filter consistency with server (FR-NOTIF-009).
+  // 4 조건 모두 충족하는 미읽음 item만 "미발송 알림"으로 카운트.
+  const pending = ITEMS.filter(i => {
+    if (i.read) return false;
+    if (!isAlertOn(i.cat) || getChannel(i.cat) !== 'instant') return false;
+    if (!state.siteEnabled[i.siteId]) return false;
+    const site = siteById(i.siteId);
+    if (site && site.systemEnabled === false) return false;
+    return true;
+  }).length;
   document.getElementById('h-pending').textContent = pending;
   const totalUnread = ITEMS.filter(i => !i.read && isSubscribed(i.cat)).length;
   document.getElementById('bell-count').textContent = totalUnread;
@@ -749,32 +932,100 @@ function renderSidebar() {
   otherList.innerHTML = '';
 
   CATEGORIES.forEach(cat => {
-    const li = document.createElement('li');
-    li.className = 'cat-item' + (view.category === cat.id ? ' active' : '');
-    li.dataset.cat = cat.id;
-    const subbed = isSubscribed(cat.id);
-    const alertOn = isAlertOn(cat.id);
-    const unread = unreadByCat(cat.id);
-    li.innerHTML = `
-      <span class="star ${subbed ? 'on' : ''}" data-action="star" title="${subbed ? '구독 중' : '구독'}">${subbed ? '★' : '☆'}</span>
-      <span class="cat-name">${cat.name}</span>
-      <span class="bell-toggle ${alertOn ? 'on' : ''}" data-action="bell" title="${alertOn ? '즉시 알림 ON' : '즉시 알림 OFF'}">${alertOn ? '🔔' : '🔕'}</span>
-      <span class="cat-count ${alertOn && unread > 0 ? 'alert' : ''}">${unread}</span>
-    `;
-    if (subbed) subList.appendChild(li); else otherList.appendChild(li);
+    const catSites = SITES.filter(s => s.cat === cat.id);
+    const fragment = renderCategoryRow(cat, catSites);
+    if (isSubscribed(cat.id)) subList.appendChild(fragment);
+    else otherList.appendChild(fragment);
   });
 
-  // "전체" + "내 구독 전체" virtual rows at top of subscribed
+  // "내 구독 전체" virtual row at top of subscribed list.
   const allItem = document.createElement('li');
   allItem.className = 'cat-item' + (view.category === 'all' ? ' active' : '');
   allItem.dataset.cat = 'all';
   const totalUnread = ITEMS.filter(i => !i.read && isSubscribed(i.cat)).length;
+  // Aggregate X/Y across all user-subscribed categories.
+  const subscribedCatIds = CATEGORIES.filter(c => isSubscribed(c.id)).map(c => c.id);
+  const subscribedSysSites = SITES.filter(
+    s => subscribedCatIds.includes(s.cat) && s.systemEnabled !== false
+  );
+  const subscribedUserEnabled = subscribedSysSites.filter(s => !!state.siteEnabled[s.id]).length;
+  const subscribedSysTotal = subscribedSysSites.length;
+  const allFractionTitle = `구독 카테고리 전체에서 ${subscribedUserEnabled} / ${subscribedSysTotal} 사이트 모니터링 중`;
   allItem.innerHTML = `
+    <span class="accordion-toggle spacer">·</span>
     <span class="star" style="visibility:hidden">·</span>
     <span class="cat-name">내 구독 전체</span>
+    <span class="site-fraction" title="${escapeAttr(allFractionTitle)}">${subscribedUserEnabled}/${subscribedSysTotal}</span>
     <span class="cat-count ${totalUnread > 0 ? 'alert' : ''}">${totalUnread}</span>
   `;
   subList.insertBefore(allItem, subList.firstChild);
+}
+
+function renderCategoryRow(cat, catSites) {
+  // DocumentFragment to bundle the cat-item li + optional site-list ul.
+  const frag = document.createDocumentFragment();
+
+  const subbed = isSubscribed(cat.id);
+  const alertOn = isAlertOn(cat.id);
+  const unread = unreadByCat(cat.id);
+  const expanded = !!state.expanded[cat.id];
+
+  // X/Y 사이트 카운트 (Step 4.5 UI 보완):
+  //   Y = 시스템 활성(Site.enabled=True) 사이트 수
+  //   X = 그 중 사용자가 monitoring on한 사이트 수 (SiteSubscription.enabled=True)
+  // YAML seed의 system-disabled 사이트는 Y 분모에서 제외 — 사용자가 켤 수 없으므로.
+  const sysEnabledSites = catSites.filter(s => s.systemEnabled !== false);
+  const userEnabledCount = sysEnabledSites.filter(s => !!state.siteEnabled[s.id]).length;
+  const sysEnabledTotal = sysEnabledSites.length;
+  const siteFractionTitle = `${userEnabledCount} / ${sysEnabledTotal} 사이트 모니터링 중 (전체 ${catSites.length}개)`;
+
+  const li = document.createElement('li');
+  li.className = 'cat-item' + (view.category === cat.id ? ' active' : '');
+  li.dataset.cat = cat.id;
+  li.innerHTML = `
+    <span class="accordion-toggle" data-action="accordion" title="${expanded ? '접기' : '펼치기'}">${expanded ? '▼' : '▶'}</span>
+    <span class="star ${subbed ? 'on' : ''}" data-action="star" title="${subbed ? '구독 중' : '구독'}">${subbed ? '★' : '☆'}</span>
+    <span class="cat-name">${escapeHtml(cat.name)}</span>
+    <span class="site-fraction" title="${escapeAttr(siteFractionTitle)}">${userEnabledCount}/${sysEnabledTotal}</span>
+    <span class="bell-toggle ${alertOn ? 'on' : ''}" data-action="bell" title="${alertOn ? '즉시 알림 ON' : '즉시 알림 OFF'}">${alertOn ? '🔔' : '🔕'}</span>
+    <span class="cat-count ${alertOn && unread > 0 ? 'alert' : ''}">${unread}</span>
+  `;
+  frag.appendChild(li);
+
+  if (expanded && catSites.length > 0) {
+    const ul = document.createElement('ul');
+    ul.className = 'site-list';
+    ul.dataset.catList = cat.id;
+    ul.innerHTML = catSites.map(site => {
+      const userEnabled = !!state.siteEnabled[site.id];
+      const sysDisabled = site.systemEnabled === false;
+      const checked = userEnabled && !sysDisabled;
+      const dotClass = ['ok','delayed','failed','blocked'].includes(site.status) ? site.status : 'ok';
+      const tooltip = sysDisabled
+        ? '관리자에 의해 비활성화됨'
+        : (userEnabled ? '모니터링 ON' : '모니터링 OFF');
+      return `
+        <li class="site-item${sysDisabled ? ' disabled' : ''}" data-site="${escapeAttr(site.id)}">
+          <input type="checkbox" data-action="site-toggle" data-site="${escapeAttr(site.id)}"
+            ${checked ? 'checked' : ''} ${sysDisabled ? 'disabled' : ''}
+            title="${escapeAttr(tooltip)}">
+          <span class="site-name" title="${escapeAttr(site.name)}">${escapeHtml(site.name)}</span>
+          <span class="site-status-dot ${dotClass}" title="${escapeAttr(site.status || 'ok')}"></span>
+        </li>
+      `;
+    }).join('');
+    frag.appendChild(ul);
+  }
+  return frag;
+}
+
+function escapeAttr(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 function renderFeedHeader() {
@@ -923,11 +1174,28 @@ function renderAll() {
 
 // ===== Event handlers =====
 document.addEventListener('click', (e) => {
+  // Site checkbox toggle (Step 4.5 — FR-UI-006)
+  const siteToggle = e.target.closest('input[data-action="site-toggle"]');
+  if (siteToggle) {
+    e.stopPropagation();
+    toggleSite(siteToggle.dataset.site, !!siteToggle.checked, siteToggle);
+    return;
+  }
+
+  // Site row click (non-checkbox) should not trigger anything else.
+  const siteItem = e.target.closest('.site-item');
+  if (siteItem) { e.stopPropagation(); return; }
+
   // Category click
   const catItem = e.target.closest('.cat-item');
   if (catItem) {
     const action = e.target.dataset.action;
     const catId = catItem.dataset.cat;
+    if (action === 'accordion') {
+      e.stopPropagation();
+      toggleAccordion(catId);
+      return;
+    }
     if (action === 'star') {
       e.stopPropagation();
       toggleStar(catId);
@@ -1016,11 +1284,35 @@ document.getElementById('alert-rows')?.addEventListener('click', async (e) => {
   }
 });
 
+function toggleAccordion(catId) {
+  state.expanded[catId] = !state.expanded[catId];
+  saveAccordionState(state.expanded);
+  renderSidebar();
+}
+
+async function toggleSite(siteId, nextEnabled, checkbox) {
+  const prev = !!state.siteEnabled[siteId];
+  // Optimistic UI — flip local state immediately for snappy feedback.
+  state.siteEnabled[siteId] = !!nextEnabled;
+  if (checkbox) checkbox.checked = !!nextEnabled;
+  try {
+    const result = await patchSiteSubscription(siteId, nextEnabled);
+    state.siteEnabled[siteId] = !!(result && result.enabled);
+    if (checkbox) checkbox.checked = !!state.siteEnabled[siteId];
+  } catch (err) {
+    state.siteEnabled[siteId] = prev;
+    if (checkbox) checkbox.checked = prev;
+    const msg = (err && err.message) ? err.message : '사이트 모니터링 설정을 저장하지 못했습니다.';
+    showToast(msg, { error: true });
+  }
+}
+
 async function toggleStar(catId) {
   const prev = {
     subscribed: !!state.subscribed[catId],
     channel: state.channel[catId] || 'off',
     alertOn: !!state.alertOn[catId],
+    expanded: !!state.expanded[catId],
   };
   const next = !prev.subscribed;
   // Optimistic local update.
@@ -1028,7 +1320,11 @@ async function toggleStar(catId) {
   if (!next) {
     state.channel[catId] = 'off';
     state.alertOn[catId] = false;
+  } else {
+    // Auto-expand the category so the user sees their site checkboxes.
+    state.expanded[catId] = true;
   }
+  saveAccordionState(state.expanded);
   renderAll();
   try {
     const result = await patchSubscription(catId, {
@@ -1041,8 +1337,10 @@ async function toggleStar(catId) {
     state.subscribed[catId] = prev.subscribed;
     state.channel[catId] = prev.channel;
     state.alertOn[catId] = prev.alertOn;
+    state.expanded[catId] = prev.expanded;
+    saveAccordionState(state.expanded);
     renderAll();
-    showToast('구독 설정을 저장하지 못했습니다. 다시 시도해주세요.');
+    showToast('구독 설정을 저장하지 못했습니다. 다시 시도해주세요.', { error: true });
   }
 }
 

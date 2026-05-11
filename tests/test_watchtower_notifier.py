@@ -13,10 +13,11 @@ import pytest
 
 from app.db.models import (
     AlertLog,
+    CategorySubscription,
     Category,
     Item,
     Site,
-    Subscription,
+    SiteSubscription,
     User,
 )
 from app.db.seed import run_seed
@@ -25,6 +26,7 @@ from monitor.watchtower.notifier import (
     NotifierService,
     RATE_LIMIT_MAX,
 )
+from tests.conftest import enable_all_site_subscriptions
 
 
 # ---------------------------------------------------------------------------
@@ -106,9 +108,22 @@ _SMTP_OK = {
 
 @pytest.fixture
 def seeded(watchtower_db):
-    """Yield a sessionmaker with the standard seed loaded."""
+    """Yield a sessionmaker with the standard seed loaded.
+
+    Step 4.5 — also flips every SiteSubscription to enabled=True for u1 so
+    the AND filter (FR-NOTIF-009) doesn't suppress mails for sites that the
+    YAML seed left at enabled=False. Tests that need to exercise the
+    site-level OFF gate flip individual rows back manually.
+    """
     with watchtower_db() as session:
         run_seed(session)
+        # Also force every Site.enabled=True so YAML-disabled sites (s1/s4/s5/…)
+        # don't block AND-filter tests; per-test cases that need a system
+        # disabled site flip individual rows back.
+        for site in session.query(Site).all():
+            site.enabled = True
+        session.commit()
+        enable_all_site_subscriptions(session, user_id="u1")
     return watchtower_db
 
 
@@ -128,11 +143,11 @@ def _add_item(sm, *, site_id: str = "s2", iid: str = "iN1",
 
 def _subscribe(sm, *, user_id: str = "u1", category_id: str, channel: str) -> None:
     with sm() as session:
-        existing = session.query(Subscription).filter_by(
+        existing = session.query(CategorySubscription).filter_by(
             user_id=user_id, category_id=category_id
         ).first()
         if existing is None:
-            session.add(Subscription(
+            session.add(CategorySubscription(
                 user_id=user_id, category_id=category_id,
                 subscribed=True, channel=channel,
             ))
@@ -156,8 +171,8 @@ def test_subscription_and_alertlog_models(watchtower_db):
         session.add(Category(id="m_cat", name="x", owner_dept="x"))
         session.commit()
 
-        sub = Subscription(user_id="m_u", category_id="m_cat",
-                           subscribed=True, channel="instant")
+        sub = CategorySubscription(user_id="m_u", category_id="m_cat",
+                                   subscribed=True, channel="instant")
         session.add(sub)
         session.commit()
         assert sub.id and len(sub.id) == 32
@@ -398,6 +413,88 @@ def test_notifier_send_owner_failure_no_email_skipped(seeded):
         row = session.query(AlertLog).filter_by(channel="owner_failure").one()
         assert row.status == "skipped"
         assert row.error_message == "owner has no email"
+
+
+def _disable_site_for_user(sm, *, user_id: str = "u1", site_id: str) -> None:
+    """Test helper — flip (user_id, site_id) SiteSubscription to enabled=False."""
+    with sm() as session:
+        row = session.query(SiteSubscription).filter_by(
+            user_id=user_id, site_id=site_id,
+        ).first()
+        if row is None:
+            session.add(SiteSubscription(
+                user_id=user_id, site_id=site_id, enabled=False,
+            ))
+        else:
+            row.enabled = False
+        session.commit()
+
+
+# ---------------------------------------------------------------------------
+# Step 4.5 — AND filter (FR-NOTIF-009)
+# ---------------------------------------------------------------------------
+
+
+def test_send_instant_blocked_when_site_subscription_off(seeded):
+    """FR-NOTIF-009 — site OFF + category ON → no notification, no AlertLog row."""
+    _subscribe(seeded, category_id="reg", channel="instant")
+    _disable_site_for_user(seeded, site_id="s2")
+    iid = _add_item(seeded, site_id="s2", iid="iAND1")
+
+    stub = _SmtpStub()
+    notifier = NotifierService(
+        seeded, smtp_config=_SMTP_OK,
+        sleep=lambda _: None, smtp_factory=_make_factory(stub),
+    )
+    res = notifier.send_instant([iid])
+
+    assert res == {"sent": 0, "failed": 0, "skipped": 0, "rolled_up": 0}
+    with seeded() as session:
+        rows = session.query(AlertLog).filter_by(channel="instant").all()
+        # Site-OFF is treated as "no subscriber" — no log entry.
+        assert rows == []
+
+
+def test_send_instant_blocked_when_system_disabled_site(seeded):
+    """FR-NOTIF-009 — Site.enabled=False blocks the notification entirely."""
+    _subscribe(seeded, category_id="reg", channel="instant")
+    with seeded() as session:
+        s2 = session.get(Site, "s2")
+        s2.enabled = False
+        session.commit()
+    iid = _add_item(seeded, site_id="s2", iid="iAND2")
+
+    stub = _SmtpStub()
+    notifier = NotifierService(
+        seeded, smtp_config=_SMTP_OK,
+        sleep=lambda _: None, smtp_factory=_make_factory(stub),
+    )
+    res = notifier.send_instant([iid])
+
+    assert res["sent"] == 0
+    with seeded() as session:
+        assert session.query(AlertLog).filter_by(channel="instant").count() == 0
+
+
+def test_send_digest_filters_by_site_enabled(seeded):
+    """FR-NOTIF-009 — digest only counts items whose user has the site ON."""
+    _subscribe(seeded, category_id="ai", channel="digest")
+    # User opts out of s17 specifically.
+    _disable_site_for_user(seeded, site_id="s17")
+    _add_item(seeded, site_id="s17", iid="dAND1", title="s17 item (suppressed)")
+    _add_item(seeded, site_id="s20", iid="dAND2", title="s20 item (delivered)")
+
+    stub = _SmtpStub()
+    notifier = NotifierService(
+        seeded, smtp_config=_SMTP_OK,
+        sleep=lambda _: None, smtp_factory=_make_factory(stub),
+    )
+    notifier.send_digest()
+
+    with seeded() as session:
+        row = session.query(AlertLog).filter_by(channel="digest").one()
+        # 1 item (s20) survives the AND filter; s17 is suppressed.
+        assert "1 items in 1 categories" in (row.detail or "")
 
 
 def test_notifier_starttls_fail_closed(seeded):

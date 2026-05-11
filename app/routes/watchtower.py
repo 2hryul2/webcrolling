@@ -29,10 +29,11 @@ from sqlalchemy.orm import Session
 
 from app.db.models import (
     AlertLog,
+    CategorySubscription,
     Category,
     Item,
     Site,
-    Subscription,
+    SiteSubscription,
     User,
 )
 from app.db.session import get_session
@@ -140,6 +141,7 @@ def list_sites(session: Session = Depends(get_session)) -> list[dict[str, Any]]:
             "category_id": s.category_id,
             "crawl_method": s.crawl_method,
             "status": s.status,
+            "enabled": bool(s.enabled),
             "last_ok_at": _iso_utc(s.last_ok_at),
         }
         for s in sites
@@ -262,7 +264,7 @@ def health(session: Session = Depends(get_session)) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# /api/subscriptions  (Step 4 — FR-SUB-001~004)
+# /api/category-subscriptions  (Step 4 — FR-SUB-001~004, renamed in Step 4.5)
 # ---------------------------------------------------------------------------
 
 
@@ -270,7 +272,7 @@ _VALID_CHANNELS = ("instant", "digest", "off")
 
 
 class SubscriptionPatch(BaseModel):
-    """Body schema for ``PATCH /api/subscriptions/{category_id}``."""
+    """Body schema for ``PATCH /api/category-subscriptions/{category_id}``."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -278,7 +280,9 @@ class SubscriptionPatch(BaseModel):
     channel: Optional[str] = Field(default=None)
 
 
-def _serialize_subscription(category_id: str, sub: Optional[Subscription]) -> dict[str, Any]:
+def _serialize_subscription(
+    category_id: str, sub: Optional[CategorySubscription]
+) -> dict[str, Any]:
     if sub is None:
         return {
             "category_id": category_id,
@@ -294,15 +298,15 @@ def _serialize_subscription(category_id: str, sub: Optional[Subscription]) -> di
     }
 
 
-@router.get("/subscriptions")
-def list_subscriptions(
+@router.get("/category-subscriptions")
+def list_category_subscriptions(
     session: Session = Depends(get_session),
 ) -> list[dict[str, Any]]:
     """Return one row per category for the resolved "me" user.
 
-    Categories with no Subscription row yet are returned with default
-    ``subscribed=False, channel='off'`` so the UI can render all 8 sidebar
-    entries on first load (FR-SUB-004 — me.id only).
+    Categories with no CategorySubscription row yet are returned with
+    default ``subscribed=False, channel='off'`` so the UI can render all
+    8 sidebar entries on first load (FR-SUB-004 — me.id only).
     """
     me = _resolve_me(session)
     if me is None:
@@ -312,14 +316,14 @@ def list_subscriptions(
     existing = {
         sub.category_id: sub
         for sub in session.scalars(
-            select(Subscription).where(Subscription.user_id == me.id)
+            select(CategorySubscription).where(CategorySubscription.user_id == me.id)
         ).all()
     }
     return [_serialize_subscription(c.id, existing.get(c.id)) for c in cats]
 
 
-@router.patch("/subscriptions/{category_id}")
-def patch_subscription(
+@router.patch("/category-subscriptions/{category_id}")
+def patch_category_subscription(
     category_id: str,
     body: SubscriptionPatch,
     session: Session = Depends(get_session),
@@ -347,13 +351,13 @@ def patch_subscription(
         )
 
     sub = session.scalar(
-        select(Subscription).where(
-            Subscription.user_id == me.id,
-            Subscription.category_id == category_id,
+        select(CategorySubscription).where(
+            CategorySubscription.user_id == me.id,
+            CategorySubscription.category_id == category_id,
         )
     )
     if sub is None:
-        sub = Subscription(
+        sub = CategorySubscription(
             user_id=me.id,
             category_id=category_id,
             subscribed=False,
@@ -382,6 +386,163 @@ def patch_subscription(
     session.commit()
     session.refresh(sub)
     return _serialize_subscription(category_id, sub)
+
+
+# ---------------------------------------------------------------------------
+# /api/site-subscriptions  (Step 4.5 — FR-SUB-006~009)
+# ---------------------------------------------------------------------------
+
+
+class SiteSubscriptionPatch(BaseModel):
+    """Body schema for ``PATCH /api/site-subscriptions/{site_id}``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+
+
+def _serialize_site_subscription(
+    site_id: str, sub: Optional[SiteSubscription]
+) -> dict[str, Any]:
+    if sub is None:
+        return {
+            "site_id": site_id,
+            "enabled": False,
+            "updated_at": None,
+        }
+    return {
+        "site_id": site_id,
+        "enabled": bool(sub.enabled),
+        "updated_at": _iso_utc(sub.updated_at),
+    }
+
+
+@router.get("/site-subscriptions")
+def list_site_subscriptions(
+    session: Session = Depends(get_session),
+) -> list[dict[str, Any]]:
+    """Return one row per known site for the resolved "me" user (FR-SUB-008).
+
+    Sites with no SiteSubscription row yet are returned with default
+    ``enabled=False`` so the UI can render the full 30-row checkbox grid
+    on first load.
+    """
+    me = _resolve_me(session)
+    if me is None:
+        raise HTTPException(status_code=404, detail="등록된 사용자가 없습니다")
+
+    sites = session.scalars(select(Site).order_by(Site.id)).all()
+    existing = {
+        sub.site_id: sub
+        for sub in session.scalars(
+            select(SiteSubscription).where(SiteSubscription.user_id == me.id)
+        ).all()
+    }
+    return [_serialize_site_subscription(s.id, existing.get(s.id)) for s in sites]
+
+
+@router.patch("/site-subscriptions/{site_id}")
+def patch_site_subscription(
+    site_id: str,
+    body: SiteSubscriptionPatch,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Upsert a (me, site) subscription (FR-SUB-006, FR-SUB-007).
+
+    System-level guard: enabling a site whose ``Site.enabled=False`` is
+    rejected with HTTP 422 (FR-SUB-007). Disabling is always allowed —
+    the user can opt out of any site at any time.
+    """
+    me = _resolve_me(session)
+    if me is None:
+        raise HTTPException(status_code=404, detail="등록된 사용자가 없습니다")
+
+    site = session.get(Site, site_id)
+    if site is None:
+        raise HTTPException(status_code=404, detail="존재하지 않는 사이트입니다")
+
+    if body.enabled and not site.enabled:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"site_id '{site_id}' 은 관리자에 의해 비활성화되어 "
+                f"사용자가 활성화할 수 없습니다."
+            ),
+        )
+
+    sub = session.scalar(
+        select(SiteSubscription).where(
+            SiteSubscription.user_id == me.id,
+            SiteSubscription.site_id == site_id,
+        )
+    )
+    if sub is None:
+        sub = SiteSubscription(
+            user_id=me.id,
+            site_id=site_id,
+            enabled=bool(body.enabled),
+        )
+        session.add(sub)
+    else:
+        sub.enabled = bool(body.enabled)
+
+    session.flush()
+    session.commit()
+    session.refresh(sub)
+    return _serialize_site_subscription(site_id, sub)
+
+
+@router.get("/categories/{category_id}/sites")
+def list_category_sites_with_user_state(
+    category_id: str,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Join sites in a category with the "me" user's SiteSubscription state.
+
+    Optional helper for UI first-load (FR-SUB-009). Returns the system-level
+    ``Site`` fields plus ``enabled_user`` (per-user SiteSubscription.enabled)
+    and ``system_enabled`` (Site.enabled).
+    """
+    me = _resolve_me(session)
+    if me is None:
+        raise HTTPException(status_code=404, detail="등록된 사용자가 없습니다")
+
+    cat = session.get(Category, category_id)
+    if cat is None:
+        raise HTTPException(status_code=404, detail="존재하지 않는 카테고리입니다")
+
+    sites = session.scalars(
+        select(Site).where(Site.category_id == category_id).order_by(Site.id)
+    ).all()
+    if not sites:
+        return {"category_id": category_id, "sites": []}
+
+    site_ids = [s.id for s in sites]
+    user_subs = {
+        sub.site_id: sub
+        for sub in session.scalars(
+            select(SiteSubscription).where(
+                SiteSubscription.user_id == me.id,
+                SiteSubscription.site_id.in_(site_ids),
+            )
+        ).all()
+    }
+    return {
+        "category_id": category_id,
+        "sites": [
+            {
+                "id": s.id,
+                "name": s.name,
+                "url": s.url,
+                "status": s.status,
+                "system_enabled": bool(s.enabled),
+                "enabled_user": bool(
+                    user_subs[s.id].enabled if s.id in user_subs else False
+                ),
+            }
+            for s in sites
+        ],
+    }
 
 
 # ---------------------------------------------------------------------------

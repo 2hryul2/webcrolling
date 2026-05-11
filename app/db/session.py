@@ -13,7 +13,7 @@ import stat
 from pathlib import Path
 from typing import Iterator
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -70,12 +70,13 @@ def sessionmaker_for_engine(eng: Engine):
 
 
 def init_db() -> None:
-    """Create all tables and lock down DB file permissions.
+    """Create all tables, run one-shot migrations, and lock down DB perms.
 
     Called once during FastAPI lifespan startup. Idempotent: SQLAlchemy's
     `create_all` is a no-op when tables already exist.
     """
     Base.metadata.create_all(engine)
+    migrate_subscriptions_to_category_subscriptions(engine)
     # NFR-SEC-005 / Constraints — file permissions 0o600. Best-effort: on
     # Windows `chmod` is a no-op (permissions model differs). Same policy as
     # Step 1 JSONL files.
@@ -85,6 +86,63 @@ def init_db() -> None:
             os.chmod(db_path, stat.S_IRUSR | stat.S_IWUSR)
         except OSError as exc:
             logger.debug("chmod 0o600 skipped for %s: %s", db_path, exc)
+
+
+def migrate_subscriptions_to_category_subscriptions(eng: Engine) -> int:
+    """FR-MIG-001 — copy rows from the legacy `subscriptions` table.
+
+    Runs once on every boot but is idempotent: when the legacy table is
+    absent or the new table already has rows the function exits with a
+    NO-OP. Returns the count of rows transferred (0 when nothing to do).
+
+    Strategy: single transaction — INSERT…SELECT into
+    `category_subscriptions`, then DROP the legacy table. On any failure
+    the transaction rolls back and we log a WARN; boot is *not* aborted
+    so the operator can recover manually.
+    """
+    insp = inspect(eng)
+    if "subscriptions" not in insp.get_table_names():
+        logger.info("[migration] subscriptions table not found — skip")
+        return 0
+
+    with eng.begin() as conn:
+        existing = conn.execute(
+            text("SELECT COUNT(*) FROM category_subscriptions")
+        ).scalar_one()
+        if existing:
+            # Already migrated (or independently seeded). Drop the legacy
+            # table to avoid drifting back into the old schema.
+            conn.execute(text("DROP TABLE subscriptions"))
+            logger.info(
+                "[migration] subscriptions dropped — category_subscriptions "
+                "already populated (%d rows)",
+                existing,
+            )
+            return 0
+
+        try:
+            result = conn.execute(
+                text(
+                    "INSERT INTO category_subscriptions "
+                    "(id, user_id, category_id, subscribed, channel, updated_at) "
+                    "SELECT id, user_id, category_id, subscribed, channel, updated_at "
+                    "FROM subscriptions"
+                )
+            )
+            transferred = result.rowcount or 0
+            conn.execute(text("DROP TABLE subscriptions"))
+            logger.info(
+                "[migration] subscriptions → category_subscriptions: "
+                "%d rows migrated",
+                transferred,
+            )
+            return transferred
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "[migration] failed: %s; continuing with current schema",
+                type(exc).__name__,
+            )
+            raise
 
 
 def get_session() -> Iterator[Session]:

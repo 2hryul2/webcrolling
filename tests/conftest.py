@@ -110,6 +110,36 @@ def watchtower_db(tmp_path: Path):
         eng.dispose()
 
 
+def enable_all_site_subscriptions(session, user_id: str = "u1") -> int:
+    """Test helper — flip every (user_id, site_id) row to ``enabled=True``.
+
+    Used by notifier suites so AND-filter logic (FR-NOTIF-009) doesn't suppress
+    test mails for sites the seed left at ``enabled=False``. Returns the count
+    of rows updated.
+    """
+    from app.db.models import Site, SiteSubscription
+
+    site_ids = [row[0] for row in session.query(Site.id).all()]
+    if not site_ids:
+        return 0
+
+    updated = 0
+    existing = {
+        sub.site_id: sub
+        for sub in session.query(SiteSubscription).filter_by(user_id=user_id).all()
+    }
+    for sid in site_ids:
+        sub = existing.get(sid)
+        if sub is None:
+            session.add(SiteSubscription(user_id=user_id, site_id=sid, enabled=True))
+            updated += 1
+        elif not sub.enabled:
+            sub.enabled = True
+            updated += 1
+    session.commit()
+    return updated
+
+
 @pytest.fixture
 def watchtower_app(watchtower_db, monkeypatch):
     """FastAPI app + TestClient with `get_session` overridden to a tmp DB.
